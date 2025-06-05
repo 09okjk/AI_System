@@ -22,34 +22,15 @@ project_root = Path(__file__).parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+# 延迟导入，避免循环依赖
 def get_managers():
     """延迟导入管理器类"""
     try:
-        # 确保导入路径正确
-        import sys
-        from pathlib import Path
-        project_root = Path(__file__).parent
-        src_path = project_root / 'src'
-        if str(src_path) not in sys.path:
-            sys.path.insert(0, str(src_path))
-        
-        # 先导入基础模块
-        import src.models
-        from src.models import SystemStatusResponse
-        
-        # 验证导入是否成功
-        if not hasattr(src.models, 'SystemStatusResponse'):
-            raise ImportError("models 模块中找不到 SystemStatusResponse 类")
-            
-        # 然后导入其他类
         from src.config import ConfigManager
         from src.mcp import MCPManager
         from src.llm import LLMManager
         from src.speech import SpeechProcessor
         from src.logger import setup_logger, get_logger
-        from src.utils import validate_config, generate_response_id
-        
-        # 导入其他响应类
         from src.models import (
             LLMConfigCreate, LLMConfigUpdate, LLMConfigResponse, 
             MCPConfigCreate, MCPConfigUpdate, MCPConfigResponse,
@@ -57,7 +38,41 @@ def get_managers():
             SpeechSynthesisResponse, SpeechSynthesisRequest, VoiceChatResponse,
             ChatRequest, ChatResponse
         )
+        from src.utils import validate_config, generate_response_id
+
+#----------------------------------------------------------------------------------------
+        print("开始导入SystemStatusResponse模块...")
         
+        # 尝试分步导入并验证
+        import sys
+        print(f"Python 路径: {sys.path}")
+        
+        import src
+        print(f"成功导入 src 模块, 版本: {src.__version__}")
+        
+        import src.models
+        print(f"成功导入 src.models 模块, 包含的类: {dir(src.models)}")
+        
+        # 检查 SystemStatusResponse 是否在模块中
+        if hasattr(src.models, 'SystemStatusResponse'):
+            print("✅ SystemStatusResponse 类在 src.models 模块中找到")
+            from src.models import SystemStatusResponse
+        else:
+            print("❌ SystemStatusResponse 类在 src.models 模块中未找到")
+            # 在这里可以自定义一个临时的 SystemStatusResponse 类
+            from pydantic import BaseModel
+            class SystemStatusResponse(BaseModel):
+                """临时的系统状态响应类"""
+                success: bool = True
+                message: Optional[str] = None
+                timestamp: datetime = datetime.utcnow()
+                uptime: datetime = datetime.utcnow()
+                mcp_tools: Dict[str, Any] = {}
+                llm_models: Dict[str, Any] = {}
+                active_sessions: int = 0
+                system_metrics: Dict[str, Any] = {}
+#----------------------------------------------------------------------------------------
+
         return {
             'ConfigManager': ConfigManager,
             'MCPManager': MCPManager,
@@ -69,15 +84,23 @@ def get_managers():
             'generate_response_id': generate_response_id,
             # 导出所有响应模型
             'HealthResponse': HealthResponse,
-            'SystemStatusResponse': SystemStatusResponse,  # 确保这里使用正确导入的类
-            # 其他响应类...
+            'SystemStatusResponse': SystemStatusResponse,
+            'SpeechRecognitionResponse': SpeechRecognitionResponse,
+            'SpeechSynthesisResponse': SpeechSynthesisResponse,
+            'SpeechSynthesisRequest': SpeechSynthesisRequest,
+            'VoiceChatResponse': VoiceChatResponse,
+            'ChatRequest': ChatRequest,
+            'ChatResponse': ChatResponse,
+            'MCPConfigCreate': MCPConfigCreate,
+            'MCPConfigUpdate': MCPConfigUpdate,
+            'MCPConfigResponse': MCPConfigResponse,
+            'LLMConfigCreate': LLMConfigCreate,
+            'LLMConfigUpdate': LLMConfigUpdate,
+            'LLMConfigResponse': LLMConfigResponse
         }
     except ImportError as e:
-        # 更详细的错误信息
-        import traceback
-        error_msg = f"导入失败: {str(e)}\n{traceback.format_exc()}"
-        print(f"❌ 导入错误: {error_msg}")
-        return {'error': error_msg}
+        # 如果导入失败，返回一个包含错误信息的字典
+        return {'error': f"导入失败: {str(e)}"}
 
 # 创建 FastAPI 应用
 app = FastAPI(
