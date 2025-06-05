@@ -12,7 +12,13 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import sys
-from src.models import SystemStatusResponse 
+from src.models import (
+            LLMConfigCreate, LLMConfigUpdate, LLMConfigResponse, 
+            MCPConfigCreate, MCPConfigUpdate, MCPConfigResponse,
+            HealthResponse, SpeechRecognitionResponse,
+            SpeechSynthesisResponse, SpeechSynthesisRequest, VoiceChatResponse,
+            ChatRequest, ChatResponse, SystemStatusResponse
+        )
 
 # 确保项目根目录在 Python 路径中
 project_root = Path(__file__).parent
@@ -28,13 +34,6 @@ def get_managers():
         from src.llm import LLMManager
         from src.speech import SpeechProcessor
         from src.logger import setup_logger, get_logger
-        from src.models import (
-            LLMConfigCreate, LLMConfigUpdate, LLMConfigResponse, 
-            MCPConfigCreate, MCPConfigUpdate, MCPConfigResponse,
-            HealthResponse, SpeechRecognitionResponse,
-            SpeechSynthesisResponse, SpeechSynthesisRequest, VoiceChatResponse,
-            ChatRequest, ChatResponse
-        )
         from src.utils import validate_config, generate_response_id
         
         return {
@@ -59,7 +58,8 @@ def get_managers():
             'MCPConfigResponse': MCPConfigResponse,
             'LLMConfigCreate': LLMConfigCreate,
             'LLMConfigUpdate': LLMConfigUpdate,
-            'LLMConfigResponse': LLMConfigResponse
+            'LLMConfigResponse': LLMConfigResponse,
+            'SystemStatusResponse': SystemStatusResponse
         }
     except ImportError as e:
         # 如果导入失败，返回一个包含错误信息的字典
