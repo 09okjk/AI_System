@@ -425,6 +425,37 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             "sample_rate": self.model.sample_rate
         }
 
+class SpeechSynthesizer:
+    """语音合成器基类"""
+    
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.is_initialized = False
+    
+    async def initialize(self) -> bool:
+        """初始化合成器"""
+        try:
+            await self._setup()
+            self.is_initialized = True
+            return True
+        except Exception as e:
+            logger.error(f"❌ 语音合成器初始化失败: {str(e)}")
+            return False
+    
+    async def _setup(self):
+        """设置合成器（由子类实现）"""
+        pass
+    
+    async def synthesize(self, 
+                        text: str, 
+                        voice: Optional[str] = None,
+                        language: str = "zh-CN",
+                        speed: float = 1.0,
+                        pitch: float = 1.0,
+                        **kwargs) -> Dict[str, Any]:
+        """合成语音（由子类实现）"""
+        raise NotImplementedError
+
 class MockSynthesizer(SpeechSynthesizer):
     """模拟语音合成器"""
     
