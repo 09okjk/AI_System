@@ -12,10 +12,11 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 from pathlib import Path
 import json
+import os
 
 from .logger import get_logger, log_speech_operation
 from .models import SpeechRecognitionResponse, SpeechSynthesisResponse, AudioFormat
-from .utils import generate_response_id, save_file_async, load_file_async
+from .utils import generate_response_id
 
 logger = get_logger(__name__)
 
@@ -524,102 +525,189 @@ class SpeechProcessor:
     """语音处理器主类"""
     
     def __init__(self):
-        self.recognizers: Dict[str, SpeechRecognizer] = {}
-        self.synthesizers: Dict[str, SpeechSynthesizer] = {}
+        self.recognizers: Dict[str, Any] = {}
+        self.synthesizers: Dict[str, Any] = {}
         self.default_recognizer = None
         self.default_synthesizer = None
         self.is_initialized = False
         
-        # 可用的引擎
-        self.available_recognizers = {
-            "sensvoice": SensVoiceRecognizer,
-            "whisper": WhisperRecognizer
-        }
-        
-        self.available_synthesizers = {
-            "cosyvoice": CosyVoiceSynthesizer,
-            "edge_tts": EdgeTTSSynthesizer
-        }
-    
+        # 从环境变量或配置文件读取模型路径
+        self.cosyvoice_model_dir = os.getenv(
+            'COSYVOICE_MODEL_DIR', 
+            'pretrained_models/CosyVoice2-0.5B'
+        )
+        self.whisper_model_size = os.getenv('WHISPER_MODEL_SIZE', 'base')
+        self.device = os.getenv('SPEECH_DEVICE', 'cpu')
+
     async def initialize(self):
         """初始化语音处理器"""
         logger.info("🔧 初始化语音处理器")
         
-        # 初始化识别器
-        await self._initialize_recognizers()
+        # 尝试初始化可用的识别器
+        await self._try_initialize_recognizers()
         
-        # 初始化合成器
-        await self._initialize_synthesizers()
+        # 尝试初始化可用的合成器
+        await self._try_initialize_synthesizers()
         
         self.is_initialized = True
-        logger.info("✅ 语音处理器初始化完成")
+        
+        available_recognizers = list(self.recognizers.keys())
+        available_synthesizers = list(self.synthesizers.keys())
+        
+        logger.info(f"✅ 语音处理器初始化完成")
+        logger.info(f"  - 可用识别器: {available_recognizers}")
+        logger.info(f"  - 可用合成器: {available_synthesizers}")
+        
+        if not available_recognizers and not available_synthesizers:
+            logger.warning("⚠️ 没有可用的语音处理引擎，将使用模拟模式")
     
-    async def _initialize_recognizers(self):
-        """初始化语音识别器"""
-        for name, recognizer_class in self.available_recognizers.items():
-            try:
-                config = {
-                    "device": "cpu",  # 可以从配置文件读取
-                    "model_size": "base"  # Whisper 配置
+
+    async def _try_initialize_recognizers(self):
+        """尝试初始化语音识别器"""
+        
+        # 尝试 SensVoice/FunASR
+        try:
+            from funasr import AutoModel
+            
+            model = AutoModel(
+                model="paraformer-zh",
+                vad_model="fsmn-vad",
+                punc_model="ct-punc",
+                device=self.device
+            )
+            
+            self.recognizers['sensvoice'] = {
+                'model': model,
+                'type': 'sensvoice'
+            }
+            
+            if self.default_recognizer is None:
+                self.default_recognizer = 'sensvoice'
+            
+            logger.info("✅ SensVoice 识别器初始化成功")
+            
+        except ImportError:
+            logger.info("ℹ️ FunASR 未安装，跳过 SensVoice 识别器")
+        except Exception as e:
+            logger.warning(f"⚠️ SensVoice 识别器初始化失败: {str(e)}")
+        
+        # 尝试 Whisper
+        try:
+            import whisper
+            
+            model = whisper.load_model(self.whisper_model_size)
+            
+            self.recognizers['whisper'] = {
+                'model': model,
+                'type': 'whisper'
+            }
+            
+            if self.default_recognizer is None:
+                self.default_recognizer = 'whisper'
+            
+            logger.info(f"✅ Whisper 识别器初始化成功 (模型: {self.whisper_model_size})")
+            
+        except ImportError:
+            logger.info("ℹ️ Whisper 未安装，跳过 Whisper 识别器")
+        except Exception as e:
+            logger.warning(f"⚠️ Whisper 识别器初始化失败: {str(e)}")
+        
+        # 如果没有可用的识别器，添加模拟识别器
+        if not self.recognizers:
+            self.recognizers['mock'] = {
+                'model': None,
+                'type': 'mock'
+            }
+            self.default_recognizer = 'mock'
+            logger.info("✅ 模拟识别器已启用")
+    
+
+    async def _try_initialize_synthesizers(self):
+        """尝试初始化语音合成器"""
+        
+        # 尝试 CosyVoice
+        try:
+            # 检查模型目录是否存在
+            if Path(self.cosyvoice_model_dir).exists():
+                import sys
+                sys.path.append('third_party/Matcha-TTS')
+                
+                from cosyvoice.cli.cosyvoice import CosyVoice2
+                from cosyvoice.utils.file_utils import load_wav
+                import torchaudio
+                
+                model = CosyVoice2(self.cosyvoice_model_dir, load_jit=False, load_trt=False, fp16=False)
+                
+                self.synthesizers['cosyvoice'] = {
+                    'model': model,
+                    'load_wav': load_wav,
+                    'torchaudio': torchaudio,
+                    'type': 'cosyvoice'
                 }
                 
-                recognizer = recognizer_class(config)
-                if await recognizer.initialize():
-                    self.recognizers[name] = recognizer
-                    if self.default_recognizer is None:
-                        self.default_recognizer = name
-                    logger.info(f"✅ 语音识别器初始化成功: {name}")
-                else:
-                    logger.warning(f"⚠️ 语音识别器初始化失败: {name}")
-            
-            except Exception as e:
-                logger.error(f"❌ 语音识别器初始化异常 [{name}]: {str(e)}")
-    
-    async def _initialize_synthesizers(self):
-        """初始化语音合成器"""
-        for name, synthesizer_class in self.available_synthesizers.items():
-            try:
-                config = {
-                    "model_dir": "pretrained_models/CosyVoice2-0.5B",  # CosyVoice 配置
-                    "reference_audio": "reference.wav",
-                    "reference_text": "参考音频文本"
-                }
+                if self.default_synthesizer is None:
+                    self.default_synthesizer = 'cosyvoice'
                 
-                synthesizer = synthesizer_class(config)
-                if await synthesizer.initialize():
-                    self.synthesizers[name] = synthesizer
-                    if self.default_synthesizer is None:
-                        self.default_synthesizer = name
-                    logger.info(f"✅ 语音合成器初始化成功: {name}")
-                else:
-                    logger.warning(f"⚠️ 语音合成器初始化失败: {name}")
+                logger.info("✅ CosyVoice 合成器初始化成功")
+            else:
+                logger.info(f"ℹ️ CosyVoice 模型目录不存在: {self.cosyvoice_model_dir}")
+                
+        except ImportError:
+            logger.info("ℹ️ CosyVoice 依赖未安装，跳过 CosyVoice 合成器")
+        except Exception as e:
+            logger.warning(f"⚠️ CosyVoice 合成器初始化失败: {str(e)}")
+        
+        # 尝试 Edge TTS
+        try:
+            import edge_tts
             
-            except Exception as e:
-                logger.error(f"❌ 语音合成器初始化异常 [{name}]: {str(e)}")
+            self.synthesizers['edge_tts'] = {
+                'model': edge_tts,
+                'type': 'edge_tts'
+            }
+            
+            if self.default_synthesizer is None:
+                self.default_synthesizer = 'edge_tts'
+            
+            logger.info("✅ Edge TTS 合成器初始化成功")
+            
+        except ImportError:
+            logger.info("ℹ️ Edge TTS 未安装，跳过 Edge TTS 合成器")
+        except Exception as e:
+            logger.warning(f"⚠️ Edge TTS 合成器初始化失败: {str(e)}")
+        
+        # 如果没有可用的合成器，添加模拟合成器
+        if not self.synthesizers:
+            self.synthesizers['mock'] = {
+                'model': None,
+                'type': 'mock'
+            }
+            self.default_synthesizer = 'mock'
+            logger.info("✅ 模拟合成器已启用")
     
+
     async def recognize(self, 
                        audio_data: bytes,
                        language: str = "zh-CN",
                        model_name: Optional[str] = None,
                        request_id: Optional[str] = None) -> SpeechRecognitionResponse:
-        """语音识别"""
+        """语音识别 - 改进版"""
         if not self.is_initialized:
             raise RuntimeError("语音处理器未初始化")
         
         # 选择识别器
         recognizer_name = model_name or self.default_recognizer
         if recognizer_name not in self.recognizers:
-            raise ValueError(f"语音识别器不可用: {recognizer_name}")
+            # 回退到默认识别器
+            recognizer_name = self.default_recognizer
+            logger.warning(f"⚠️ 指定的识别器不可用，使用默认识别器: {recognizer_name}")
         
         recognizer = self.recognizers[recognizer_name]
         
         try:
             logger.info(f"🎤 开始语音识别 - 模型: {recognizer_name}, 语言: {language}")
             
-            result = await recognizer.recognize(
-                audio_data=audio_data,
-                language=language
-            )
+            result = await self._perform_recognition(recognizer, audio_data, language)
             
             logger.info(f"✅ 语音识别完成 - 文本长度: {len(result['text'])}")
             
@@ -636,7 +724,131 @@ class SpeechProcessor:
             
         except Exception as e:
             logger.error(f"❌ 语音识别失败: {str(e)}")
-            raise
+            # 返回错误响应而不是抛出异常
+            return SpeechRecognitionResponse(
+                success=False,
+                text="",
+                language=language,
+                confidence=0.0,
+                processing_time=0.0,
+                model_used=recognizer_name,
+                request_id=request_id or generate_response_id(),
+                timestamp=datetime.utcnow(),
+                message=f"识别失败: {str(e)}"
+            )
+    
+    async def _perform_recognition(self, recognizer: Dict[str, Any], audio_data: bytes, language: str) -> Dict[str, Any]:
+        """执行具体的语音识别"""
+        start_time = time.time()
+        
+        if recognizer['type'] == 'mock':
+            # 模拟识别
+            await asyncio.sleep(0.5)
+            processing_time = time.time() - start_time
+            
+            return {
+                "text": "这是一个模拟的语音识别结果",
+                "language": language,
+                "confidence": 0.95,
+                "processing_time": processing_time,
+                "model_used": "mock_recognizer"
+            }
+        
+        elif recognizer['type'] == 'sensvoice':
+            return await self._sensvoice_recognize(recognizer, audio_data, language, start_time)
+        
+        elif recognizer['type'] == 'whisper':
+            return await self._whisper_recognize(recognizer, audio_data, language, start_time)
+        
+        else:
+            raise ValueError(f"未知的识别器类型: {recognizer['type']}")
+    
+    async def _sensvoice_recognize(self, recognizer: Dict[str, Any], audio_data: bytes, language: str, start_time: float) -> Dict[str, Any]:
+        """SensVoice 识别实现"""
+        model = recognizer['model']
+        
+        # 保存音频到临时文件
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+            temp_file.write(audio_data)
+            temp_audio_path = temp_file.name
+        
+        try:
+            # 执行识别
+            result = model.generate(input=temp_audio_path)
+            
+            processing_time = time.time() - start_time
+            
+            # 提取识别结果
+            if result and len(result) > 0:
+                text = result[0].get('text', '')
+                confidence = result[0].get('confidence', 0.0)
+            else:
+                text = ""
+                confidence = 0.0
+            
+            log_speech_operation(
+                logger, "recognition", "sensvoice", 
+                len(audio_data), len(text), processing_time, 
+                True, language
+            )
+            
+            return {
+                "text": text,
+                "language": language,
+                "confidence": confidence,
+                "processing_time": processing_time,
+                "model_used": "sensvoice"
+            }
+            
+        finally:
+            # 清理临时文件
+            Path(temp_audio_path).unlink(missing_ok=True)
+    
+    async def _whisper_recognize(self, recognizer: Dict[str, Any], audio_data: bytes, language: str, start_time: float) -> Dict[str, Any]:
+        """Whisper 识别实现"""
+        model = recognizer['model']
+        
+        # 保存音频到临时文件
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+            temp_file.write(audio_data)
+            temp_audio_path = temp_file.name
+        
+        try:
+            # 执行识别
+            result = model.transcribe(
+                temp_audio_path,
+                language=language if language != "zh-CN" else "zh"
+            )
+            
+            processing_time = time.time() - start_time
+            
+            text = result.get('text', '')
+            
+            # Whisper 不直接提供置信度，使用平均概率估算
+            segments = result.get('segments', [])
+            confidence = 0.0
+            if segments:
+                confidences = [seg.get('avg_logprob', 0.0) for seg in segments]
+                confidence = sum(confidences) / len(confidences)
+                confidence = max(0.0, min(1.0, (confidence + 1.0) / 2.0))
+            
+            log_speech_operation(
+                logger, "recognition", "whisper", 
+                len(audio_data), len(text), processing_time, 
+                True, language
+            )
+            
+            return {
+                "text": text,
+                "language": language,
+                "confidence": confidence,
+                "processing_time": processing_time,
+                "model_used": "whisper"
+            }
+            
+        finally:
+            # 清理临时文件
+            Path(temp_audio_path).unlink(missing_ok=True)
     
     async def synthesize(self, 
                         text: str,
@@ -689,7 +901,7 @@ class SpeechProcessor:
         """健康检查"""
         try:
             return {
-                "healthy": len(self.recognizers) > 0 or len(self.synthesizers) > 0,
+                "healthy": self.is_initialized and (len(self.recognizers) > 0 or len(self.synthesizers) > 0),
                 "recognizers": {
                     "available": list(self.recognizers.keys()),
                     "default": self.default_recognizer

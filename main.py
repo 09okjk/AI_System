@@ -15,19 +15,34 @@ from typing import List, Dict, Any, Optional
 import json
 import os
 from pathlib import Path
+import sys
 
-# 导入自定义模块
-from src.config import ConfigManager
-from src.mcp import MCPManager
-from src.llm import LLMManager
-from src.speech import SpeechProcessor
-from src.logger import setup_logger, get_logger
-from src.models import *
-from src.utils import validate_config, generate_response_id
+# 确保项目根目录在 Python 路径中
+project_root = Path(__file__).parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-# 设置日志
-setup_logger()
-logger = get_logger(__name__)
+# 延迟导入，避免循环依赖
+def get_managers():
+    """延迟导入管理器类"""
+    from src.config import ConfigManager
+    from src.mcp import MCPManager
+    from src.llm import LLMManager
+    from src.speech import SpeechProcessor
+    from src.logger import setup_logger, get_logger
+    from src.models import LLMConfigCreate, LLMConfigUpdate, LLMConfigResponse, MCPConfigCreate, MCPConfigUpdate, MCPConfigResponse
+    from src.utils import validate_config, generate_response_id
+    
+    return {
+        'ConfigManager': ConfigManager,
+        'MCPManager': MCPManager,
+        'LLMManager': LLMManager,
+        'SpeechProcessor': SpeechProcessor,
+        'setup_logger': setup_logger,
+        'get_logger': get_logger,
+        'validate_config': validate_config,
+        'generate_response_id': generate_response_id
+    }
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -38,40 +53,45 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# 配置 CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # 生产环境中应该限制具体域名
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# 全局管理器实例
-config_manager = ConfigManager()
-mcp_manager = MCPManager()
-llm_manager = LLMManager()
-speech_processor = SpeechProcessor()
+# 全局变量（在startup时初始化）
+managers = None
+config_manager = None
+mcp_manager = None
+llm_manager = None
+speech_processor = None
+logger = None
 
 @app.on_event("startup")
 async def startup_event():
     """应用启动时的初始化"""
+    global managers, config_manager, mcp_manager, llm_manager, speech_processor, logger
+    
+    # 获取管理器类
+    managers = get_managers()
+    
+    # 设置日志
+    managers['setup_logger']()
+    logger = managers['get_logger'](__name__)
+    
     logger.info("🚀 AI Agent Backend 正在启动...")
     
     try:
-        # 初始化配置管理器
+        # 初始化管理器实例
+        config_manager = managers['ConfigManager']()
+        mcp_manager = managers['MCPManager']()
+        llm_manager = managers['LLMManager']()
+        speech_processor = managers['SpeechProcessor']()
+        
+        # 依次初始化
         await config_manager.initialize()
         logger.info("✅ 配置管理器初始化完成")
         
-        # 初始化 MCP 管理器
         await mcp_manager.initialize(config_manager.get_mcp_configs())
         logger.info("✅ MCP 管理器初始化完成")
         
-        # 初始化 LLM 管理器
         await llm_manager.initialize(config_manager.get_llm_configs())
         logger.info("✅ LLM 管理器初始化完成")
         
-        # 初始化语音处理器
         await speech_processor.initialize()
         logger.info("✅ 语音处理器初始化完成")
         
@@ -80,6 +100,15 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ 启动失败: {str(e)}")
         raise
+
+# 配置 CORS - 移到函数外
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.on_event("shutdown")
 async def shutdown_event():

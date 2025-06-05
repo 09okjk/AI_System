@@ -1,7 +1,7 @@
 {
     "version": "2.0.0",
     "app_name": "AI Agent Backend",
-    "default_llm_model": "default_qwen",
+    "default_llm_model": null,
     "default_language": "zh-CN",
     "log_level": "INFO",
     "log_dir": "logs",
@@ -16,16 +16,28 @@
     },
     "speech": {
       "default_asr_model": "sensvoice",
-      "default_tts_model": "cosyvoice",
+      "default_tts_model": "edge_tts",
       "supported_languages": ["zh-CN", "en-US", "ja-JP", "ko-KR"],
       "max_audio_size": 10485760,
-      "audio_formats": ["wav", "mp3", "flac", "m4a"]
+      "audio_formats": ["wav", "mp3", "flac", "m4a"],
+      "models": {
+        "cosyvoice": {
+          "model_dir": "pretrained_models/CosyVoice2-0.5B",
+          "reference_audio": "assets/reference.wav",
+          "reference_text": "参考音频文本"
+        },
+        "whisper": {
+          "model_size": "base",
+          "device": "cpu"
+        }
+      }
     },
     "mcp": {
-      "auto_start_tools": true,
+      "auto_start_tools": false,
       "restart_on_failure": true,
       "default_timeout": 30,
-      "max_concurrent_tools": 10
+      "max_concurrent_tools": 10,
+      "tools_directory": "tools"
     },
     "api": {
       "cors_origins": ["*"],
@@ -37,6 +49,6 @@
       "enable_request_logging": true,
       "sensitive_fields": ["api_key", "password", "token"]
     },
-    "created_at": "2024-01-01T00:00:00.000000",
-    "updated_at": "2024-01-01T00:00:00.000000"
+    "created_at": "2025-06-05T02:09:05.000000Z",
+    "updated_at": "2025-06-05T02:09:05.000000Z"
   }

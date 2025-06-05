@@ -109,31 +109,26 @@ class LLMConfigBase(BaseModel):
     is_default: bool = Field(False, description="是否为默认模型")
     enabled: bool = Field(True, description="是否启用")
 
-class LLMConfigCreate(LLMConfigBase):
-    """创建 LLM 配置请求"""
-    pass
+    @validator('api_key')
+    def validate_api_key(cls, v):
+        """验证 API 密钥格式"""
+        if v and len(v) < 10:
+            raise ValueError('API 密钥长度不能少于10个字符')
+        return v
 
-class LLMConfigUpdate(BaseModel):
-    """更新 LLM 配置请求"""
-    name: Optional[str] = None
-    provider: Optional[LLMProvider] = None
-    model_name: Optional[str] = None
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
-    max_tokens: Optional[int] = None
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-    system_prompt: Optional[str] = None
-    is_default: Optional[bool] = None
-    enabled: Optional[bool] = None
+    @validator('temperature')
+    def validate_temperature(cls, v):
+        """验证温度参数"""
+        if v < 0 or v > 2:
+            raise ValueError('温度参数必须在0-2之间')
+        return v
 
-class LLMConfigResponse(LLMConfigBase):
-    """LLM 配置响应"""
-    id: str
-    status: str
-    created_at: datetime
-    updated_at: datetime
-    last_used: Optional[datetime] = None
+    @validator('top_p')
+    def validate_top_p(cls, v):
+        """验证 top_p 参数"""
+        if v < 0 or v > 1:
+            raise ValueError('top_p 参数必须在0-1之间')
+        return v
 
 # ==================== 语音处理相关模型 ====================
 
