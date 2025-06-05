@@ -34,45 +34,12 @@ def get_managers():
         from src.models import (
             LLMConfigCreate, LLMConfigUpdate, LLMConfigResponse, 
             MCPConfigCreate, MCPConfigUpdate, MCPConfigResponse,
-            HealthResponse, SpeechRecognitionResponse,
+            HealthResponse, SystemStatusResponse, SpeechRecognitionResponse,
             SpeechSynthesisResponse, SpeechSynthesisRequest, VoiceChatResponse,
             ChatRequest, ChatResponse
         )
         from src.utils import validate_config, generate_response_id
-
-#----------------------------------------------------------------------------------------
-        logger.info("开始导入SystemStatusResponse模块...")
         
-        # 尝试分步导入并验证
-        import sys
-        logger.info(f"Python 路径: {sys.path}")
-        
-        import src
-        logger.info(f"成功导入 src 模块, 版本: {src.__version__}")
-        
-        import src.models
-        logger.info(f"成功导入 src.models 模块, 包含的类: {dir(src.models)}")
-        
-        # 检查 SystemStatusResponse 是否在模块中
-        if hasattr(src.models, 'SystemStatusResponse'):
-            logger.info("✅ SystemStatusResponse 类在 src.models 模块中找到")
-            from src.models import SystemStatusResponse
-        else:
-            logger.info("❌ SystemStatusResponse 类在 src.models 模块中未找到")
-            # 在这里可以自定义一个临时的 SystemStatusResponse 类
-            from pydantic import BaseModel
-            class SystemStatusResponse(BaseModel):
-                """临时的系统状态响应类"""
-                success: bool = True
-                message: Optional[str] = None
-                timestamp: datetime = datetime.utcnow()
-                uptime: datetime = datetime.utcnow()
-                mcp_tools: Dict[str, Any] = {}
-                llm_models: Dict[str, Any] = {}
-                active_sessions: int = 0
-                system_metrics: Dict[str, Any] = {}
-#----------------------------------------------------------------------------------------
-
         return {
             'ConfigManager': ConfigManager,
             'MCPManager': MCPManager,
@@ -98,11 +65,9 @@ def get_managers():
             'LLMConfigUpdate': LLMConfigUpdate,
             'LLMConfigResponse': LLMConfigResponse
         }
-    except Exception as e:
-        import traceback
-        error_msg = f"导入失败: {str(e)}\n{traceback.format_exc()}"
-        logger.error(f"❌ 详细导入错误: {error_msg}")
-        return {'error': error_msg}
+    except ImportError as e:
+        # 如果导入失败，返回一个包含错误信息的字典
+        return {'error': f"导入失败: {str(e)}"}
 
 # 创建 FastAPI 应用
 app = FastAPI(
