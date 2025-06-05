@@ -1,0 +1,42 @@
+{
+    "version": "2.0.0",
+    "app_name": "AI Agent Backend",
+    "default_llm_model": "default_qwen",
+    "default_language": "zh-CN",
+    "log_level": "INFO",
+    "log_dir": "logs",
+    "max_session_duration": 3600,
+    "rate_limit": {
+      "max_requests": 100,
+      "time_window": 60
+    },
+    "cache": {
+      "default_ttl": 300,
+      "max_size": 1000
+    },
+    "speech": {
+      "default_asr_model": "sensvoice",
+      "default_tts_model": "cosyvoice",
+      "supported_languages": ["zh-CN", "en-US", "ja-JP", "ko-KR"],
+      "max_audio_size": 10485760,
+      "audio_formats": ["wav", "mp3", "flac", "m4a"]
+    },
+    "mcp": {
+      "auto_start_tools": true,
+      "restart_on_failure": true,
+      "default_timeout": 30,
+      "max_concurrent_tools": 10
+    },
+    "api": {
+      "cors_origins": ["*"],
+      "max_request_size": 52428800,
+      "timeout": 300
+    },
+    "security": {
+      "enable_rate_limiting": true,
+      "enable_request_logging": true,
+      "sensitive_fields": ["api_key", "password", "token"]
+    },
+    "created_at": "2024-01-01T00:00:00.000000",
+    "updated_at": "2024-01-01T00:00:00.000000"
+  }
