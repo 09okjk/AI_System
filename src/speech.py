@@ -1,6 +1,7 @@
 """
-语音处理器
+语音处理器 - 优化版本
 负责语音识别和语音合成功能
+基于 SenseVoice 和 CosyVoice 官方实现优化
 """
 
 import asyncio
@@ -8,11 +9,12 @@ import base64
 import tempfile
 import time
 import uuid
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Union
 from datetime import datetime
 from pathlib import Path
 import json
 import os
+import numpy as np
 
 from .logger import get_logger, log_speech_operation
 from .models import SpeechRecognitionResponse, SpeechSynthesisResponse, AudioFormat
@@ -21,71 +23,97 @@ from .utils import generate_response_id
 logger = get_logger(__name__)
 
 class SpeechRecognizer:
-    """语音识别器基类"""
-    
+    """语音识别器基类"""    
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.is_initialized = False
-    
+        self.model = None
+        self.device = config.get('device', 'cpu')
+
     async def initialize(self) -> bool:
         """初始化识别器"""
         try:
             await self._setup()
             self.is_initialized = True
+            logger.info(f"✅ {self.__class__.__name__} 初始化成功")
             return True
         except Exception as e:
-            logger.error(f"❌ 语音识别器初始化失败: {str(e)}")
+            logger.error(f"❌ {self.__class__.__name__} 初始化失败: {str(e)}")
             return False
-    
+
     async def _setup(self):
         """设置识别器（由子类实现）"""
         pass
-    
+
     async def recognize(self, 
-                       audio_data: bytes, 
-                       language: str = "zh-CN",
-                       **kwargs) -> Dict[str, Any]:
+                        audio_data: bytes, 
+                        language: str = "zh-CN",
+                        **kwargs) -> Dict[str, Any]:
         """识别语音（由子类实现）"""
         raise NotImplementedError
 
-class SensVoiceRecognizer(SpeechRecognizer):
-    """SensVoice 语音识别器"""
+class SenseVoiceRecognizer(SpeechRecognizer):
+    """SenseVoice 语音识别器 - 基于官方实现优化"""
     
     async def _setup(self):
-        """设置 SensVoice"""
+        """设置 SenseVoice - 根据官方最佳实践"""
         try:
-            # 这里集成您之前创建的 SensVoice MCP 客户端
-            # 或者直接导入 funasr
             from funasr import AutoModel
+            
+            # 根据官方推荐的配置
+            model_config = {
+                "model": "iic/SenseVoiceSmall",  # 使用官方推荐的模型
+                "vad_model": "fsmn-vad",
+                "punc_model": "ct-punc", 
+                "device": self.device,
+                "hub": "ms",  # 使用 modelscope
+                "ncpu": self.config.get('ncpu', 4),
+                "batch_size": self.config.get('batch_size', 1)
+            }
+            
+            # 支持 VAD 的配置
+            vad_kwargs = {
+                "max_single_segment_time": self.config.get('max_single_segment_time', 60000),  # 60秒
+                "batch_size_s": self.config.get('batch_size_s', 300),  # 动态batch，总音频时长300秒
+                "batch_size_threshold_s": self.config.get('batch_size_threshold_s', 60)  # 阈值60秒
+            }
             
             # 初始化模型
             self.model = AutoModel(
-                model="paraformer-zh",
-                vad_model="fsmn-vad",
-                punc_model="ct-punc",
-                device=self.config.get('device', 'cpu')
+                model=model_config["model"],
+                vad_model=model_config["vad_model"],
+                vad_kwargs=vad_kwargs,
+                punc_model=model_config["punc_model"],
+                device=model_config["device"],
+                hub=model_config["hub"],
+                ncpu=model_config["ncpu"],
+                batch_size=model_config["batch_size"]
             )
             
-            logger.info("✅ SensVoice 模型初始化成功")
+            # 存储模型配置用于后续使用
+            self.model_config = model_config
+            self.vad_kwargs = vad_kwargs
+            
+            logger.info(f"✅ SenseVoice 模型初始化成功 - 设备: {self.device}")
             
         except ImportError:
             logger.warning("⚠️ FunASR 未安装，使用模拟识别器")
             self.model = None
         except Exception as e:
-            logger.error(f"❌ SensVoice 初始化失败: {str(e)}")
+            logger.error(f"❌ SenseVoice 初始化失败: {str(e)}")
             raise
     
     async def recognize(self, 
                        audio_data: bytes, 
                        language: str = "zh-CN",
                        **kwargs) -> Dict[str, Any]:
-        """SensVoice 语音识别"""
+        """SenseVoice 语音识别 - 优化版本"""
         start_time = time.time()
         
         try:
             if self.model is None:
                 # 模拟识别结果
-                await asyncio.sleep(0.5)  # 模拟处理时间
+                await asyncio.sleep(0.5)
                 
                 processing_time = time.time() - start_time
                 
@@ -94,7 +122,8 @@ class SensVoiceRecognizer(SpeechRecognizer):
                     "language": language,
                     "confidence": 0.95,
                     "processing_time": processing_time,
-                    "model_used": "mock_sensvoice"
+                    "model_used": "mock_sensevoice",
+                    "segments": []
                 }
             
             # 保存音频到临时文件
@@ -103,24 +132,45 @@ class SensVoiceRecognizer(SpeechRecognizer):
                 temp_audio_path = temp_file.name
             
             try:
+                # 使用官方推荐的参数执行识别
+                generation_kwargs = {
+                    "hotword": kwargs.get('hotword', ''),  # 热词
+                    "batch_size_s": self.vad_kwargs.get('batch_size_s', 300),
+                    "batch_size_threshold_s": self.vad_kwargs.get('batch_size_threshold_s', 60)
+                }
+                
+                # 添加自定义参数
+                generation_kwargs.update(kwargs)
+                
                 # 执行识别
                 result = self.model.generate(
                     input=temp_audio_path,
-                    **kwargs
+                    **generation_kwargs
                 )
                 
                 processing_time = time.time() - start_time
                 
-                # 提取识别结果
+                # 处理识别结果
                 if result and len(result) > 0:
-                    text = result[0].get('text', '')
-                    confidence = result[0].get('confidence', 0.0)
+                    # SenseVoice 返回格式通常是列表
+                    first_result = result[0] if isinstance(result, list) else result
+                    
+                    # 提取文本
+                    text = first_result.get('text', '') if isinstance(first_result, dict) else str(first_result)
+                    
+                    # 提取置信度（如果可用）
+                    confidence = first_result.get('confidence', 0.9) if isinstance(first_result, dict) else 0.9
+                    
+                    # 提取时间戳信息（如果可用）
+                    segments = first_result.get('timestamps', []) if isinstance(first_result, dict) else []
+                    
                 else:
                     text = ""
                     confidence = 0.0
+                    segments = []
                 
                 log_speech_operation(
-                    logger, "recognition", "sensvoice", 
+                    logger, "recognition", "sensevoice", 
                     len(audio_data), len(text), processing_time, 
                     True, language
                 )
@@ -130,7 +180,9 @@ class SensVoiceRecognizer(SpeechRecognizer):
                     "language": language,
                     "confidence": confidence,
                     "processing_time": processing_time,
-                    "model_used": "sensvoice"
+                    "model_used": "sensevoice",
+                    "segments": segments,
+                    "raw_result": result  # 保留原始结果以便调试
                 }
                 
             finally:
@@ -142,130 +194,61 @@ class SensVoiceRecognizer(SpeechRecognizer):
             error_msg = str(e)
             
             log_speech_operation(
-                logger, "recognition", "sensvoice", 
+                logger, "recognition", "sensevoice", 
                 len(audio_data), 0, processing_time, 
                 False, language, error_msg
             )
             
-            raise Exception(f"语音识别失败: {error_msg}")
+            raise Exception(f"SenseVoice 语音识别失败: {error_msg}")
 
-class WhisperRecognizer(SpeechRecognizer):
-    """Whisper 语音识别器"""
+class CosyVoiceSynthesizer(SpeechSynthesizer):
+    """CosyVoice 语音合成器 - 基于官方实现优化"""
     
     async def _setup(self):
-        """设置 Whisper"""
+        """设置 CosyVoice - 根据官方最佳实践"""
         try:
-            import whisper
+            # 设置 CosyVoice 路径
+            import sys
+            cosyvoice_path = self.config.get('cosyvoice_path', 'tools/CosyVoice')
+            if cosyvoice_path not in sys.path:
+                sys.path.append(cosyvoice_path)
             
-            model_size = self.config.get('model_size', 'base')
-            self.model = whisper.load_model(model_size)
+            # 导入 CosyVoice
+            from cosyvoice.cli.cosyvoice import CosyVoice2
+            from cosyvoice.utils.file_utils import load_wav
+            import torchaudio
             
-            logger.info(f"✅ Whisper 模型初始化成功: {model_size}")
+            # 模型配置
+            model_dir = self.config.get('model_dir', 'pretrained_models/CosyVoice2-0.5B')
             
-        except ImportError:
-            logger.warning("⚠️ Whisper 未安装，使用模拟识别器")
+            # 检查模型目录
+            if not Path(model_dir).exists():
+                raise FileNotFoundError(f"CosyVoice 模型目录不存在: {model_dir}")
+            
+            # 初始化模型
+            self.model = CosyVoice2(
+                model_dir=model_dir,
+                load_jit=self.config.get('load_jit', False),
+                load_trt=self.config.get('load_trt', False),
+                fp16=self.config.get('fp16', False)
+            )
+            
+            # 保存工具函数
+            self.load_wav = load_wav
+            self.torchaudio = torchaudio
+            
+            # 参考音频设置
+            self.reference_audio_path = self.config.get('reference_audio', None)
+            self.reference_text = self.config.get('reference_text', '参考音频文本')
+            
+            logger.info(f"✅ CosyVoice 模型初始化成功 - 模型路径: {model_dir}")
+            
+        except ImportError as e:
+            logger.warning(f"⚠️ CosyVoice 未正确安装: {str(e)}")
             self.model = None
         except Exception as e:
-            logger.error(f"❌ Whisper 初始化失败: {str(e)}")
+            logger.error(f"❌ CosyVoice 初始化失败: {str(e)}")
             raise
-    
-    async def recognize(self, 
-                       audio_data: bytes, 
-                       language: str = "zh",
-                       **kwargs) -> Dict[str, Any]:
-        """Whisper 语音识别"""
-        start_time = time.time()
-        
-        try:
-            if self.model is None:
-                # 模拟识别结果
-                await asyncio.sleep(1.0)
-                
-                processing_time = time.time() - start_time
-                
-                return {
-                    "text": "这是一个模拟的 Whisper 识别结果",
-                    "language": language,
-                    "confidence": 0.90,
-                    "processing_time": processing_time,
-                    "model_used": "mock_whisper"
-                }
-            
-            # 保存音频到临时文件
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_file.write(audio_data)
-                temp_audio_path = temp_file.name
-            
-            try:
-                # 执行识别
-                result = self.model.transcribe(
-                    temp_audio_path,
-                    language=language if language != "zh-CN" else "zh",
-                    **kwargs
-                )
-                
-                processing_time = time.time() - start_time
-                
-                text = result.get('text', '')
-                
-                # Whisper 不直接提供置信度，使用平均概率
-                segments = result.get('segments', [])
-                confidence = 0.0
-                if segments:
-                    confidences = [seg.get('avg_logprob', 0.0) for seg in segments]
-                    confidence = sum(confidences) / len(confidences)
-                    confidence = max(0.0, min(1.0, (confidence + 1.0) / 2.0))  # 转换为0-1范围
-                
-                log_speech_operation(
-                    logger, "recognition", "whisper", 
-                    len(audio_data), len(text), processing_time, 
-                    True, language
-                )
-                
-                return {
-                    "text": text,
-                    "language": language,
-                    "confidence": confidence,
-                    "processing_time": processing_time,
-                    "model_used": "whisper"
-                }
-                
-            finally:
-                # 清理临时文件
-                Path(temp_audio_path).unlink(missing_ok=True)
-                
-        except Exception as e:
-            processing_time = time.time() - start_time
-            error_msg = str(e)
-            
-            log_speech_operation(
-                logger, "recognition", "whisper", 
-                len(audio_data), 0, processing_time, 
-                False, language, error_msg
-            )
-            
-            raise Exception(f"Whisper 识别失败: {error_msg}")
-
-class SpeechSynthesizer:
-    """语音合成器基类"""
-    
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-        self.is_initialized = False
-    
-    async def initialize(self) -> bool:
-        """初始化合成器"""
-        try:
-            await self._setup()
-            self.is_initialized = True
-            return True
-        except Exception as e:
-            logger.error(f"❌ 语音合成器初始化失败: {str(e)}")
-            return False
-    
-    async def _setup(self):
-        """设置合成器（由子类实现）"""
-        pass
     
     async def synthesize(self, 
                         text: str, 
@@ -273,9 +256,174 @@ class SpeechSynthesizer:
                         language: str = "zh-CN",
                         speed: float = 1.0,
                         pitch: float = 1.0,
+                        synthesis_mode: str = "zero_shot",
                         **kwargs) -> Dict[str, Any]:
-        """合成语音（由子类实现）"""
-        raise NotImplementedError
+        """CosyVoice 语音合成 - 支持多种合成模式"""
+        start_time = time.time()
+        
+        try:
+            if self.model is None:
+                # 模拟合成结果
+                await asyncio.sleep(1.5)
+                
+                processing_time = time.time() - start_time
+                
+                # 创建模拟音频数据（静音）
+                sample_rate = 22050
+                duration = max(len(text) / 10, 1.0)  # 基于文本长度估算时长
+                audio_samples = int(sample_rate * duration)
+                mock_audio = b'\x00' * (audio_samples * 2)  # 16位PCM
+                
+                audio_base64 = base64.b64encode(mock_audio).decode('utf-8')
+                
+                return {
+                    "audio_data": audio_base64,
+                    "format": AudioFormat.WAV,
+                    "duration": duration,
+                    "processing_time": processing_time,
+                    "model_used": "mock_cosyvoice",
+                    "synthesis_mode": synthesis_mode
+                }
+            
+            # 根据合成模式选择不同的方法
+            if synthesis_mode == "zero_shot":
+                result = await self._zero_shot_synthesis(text, kwargs)
+            elif synthesis_mode == "cross_lingual":
+                result = await self._cross_lingual_synthesis(text, kwargs)
+            elif synthesis_mode == "instruct":
+                result = await self._instruct_synthesis(text, kwargs)
+            else:
+                # 默认使用零样本合成
+                result = await self._zero_shot_synthesis(text, kwargs)
+            
+            processing_time = time.time() - start_time
+            result["processing_time"] = processing_time
+            result["synthesis_mode"] = synthesis_mode
+            
+            log_speech_operation(
+                logger, "synthesis", "cosyvoice", 
+                len(text), len(result["audio_data"]), processing_time, 
+                True, language
+            )
+            
+            return result
+            
+        except Exception as e:
+            processing_time = time.time() - start_time
+            error_msg = str(e)
+            
+            log_speech_operation(
+                logger, "synthesis", "cosyvoice", 
+                len(text), 0, processing_time, 
+                False, language, error_msg
+            )
+            
+            raise Exception(f"CosyVoice 合成失败: {error_msg}")
+    
+    async def _zero_shot_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """零样本语音合成"""
+        # 获取参考音频
+        reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
+        reference_text = kwargs.get('reference_text', self.reference_text)
+        
+        if not reference_audio_path or not Path(reference_audio_path).exists():
+            raise FileNotFoundError(f"参考音频文件不存在: {reference_audio_path}")
+        
+        # 加载参考音频
+        reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
+        
+        # 执行合成
+        output_audio = None
+        stream = kwargs.get('stream', False)
+        
+        for i, result in enumerate(self.model.inference_zero_shot(
+            text, reference_text, reference_audio, stream=stream
+        )):
+            output_audio = result['tts_speech']
+            if not stream:  # 非流式模式只取第一个结果
+                break
+        
+        if output_audio is None:
+            raise Exception("零样本合成失败，未生成音频")
+        
+        return await self._process_output_audio(output_audio)
+    
+    async def _cross_lingual_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """跨语言语音合成"""
+        reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
+        
+        if not reference_audio_path or not Path(reference_audio_path).exists():
+            raise FileNotFoundError(f"参考音频文件不存在: {reference_audio_path}")
+        
+        # 加载参考音频
+        reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
+        
+        # 执行跨语言合成
+        output_audio = None
+        stream = kwargs.get('stream', False)
+        
+        for i, result in enumerate(self.model.inference_cross_lingual(
+            text, reference_audio, stream=stream
+        )):
+            output_audio = result['tts_speech']
+            if not stream:
+                break
+        
+        if output_audio is None:
+            raise Exception("跨语言合成失败，未生成音频")
+        
+        return await self._process_output_audio(output_audio)
+    
+    async def _instruct_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """指令式语音合成"""
+        reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
+        instruction = kwargs.get('instruction', '用温和的语调朗读')
+        
+        if not reference_audio_path or not Path(reference_audio_path).exists():
+            raise FileNotFoundError(f"参考音频文件不存在: {reference_audio_path}")
+        
+        # 加载参考音频
+        reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
+        
+        # 执行指令式合成
+        output_audio = None
+        stream = kwargs.get('stream', False)
+        
+        for i, result in enumerate(self.model.inference_instruct(
+            text, instruction, reference_audio, stream=stream
+        )):
+            output_audio = result['tts_speech']
+            if not stream:
+                break
+        
+        if output_audio is None:
+            raise Exception("指令式合成失败，未生成音频")
+        
+        return await self._process_output_audio(output_audio)
+    
+    async def _process_output_audio(self, output_audio) -> Dict[str, Any]:
+        """处理输出音频"""
+        import io
+        
+        # 转换为字节数据
+        buffer = io.BytesIO()
+        self.torchaudio.save(buffer, output_audio, self.model.sample_rate, format='wav')
+        buffer.seek(0)
+        audio_data = buffer.read()
+        
+        # 编码为base64
+        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+        
+        # 计算时长
+        duration = output_audio.shape[1] / self.model.sample_rate
+        
+        return {
+            "audio_data": audio_base64,
+            "format": AudioFormat.WAV,
+            "duration": duration,
+            "model_used": "cosyvoice",
+            "sample_rate": self.model.sample_rate
+        }
 
 class MockSynthesizer(SpeechSynthesizer):
     """模拟语音合成器"""
@@ -297,7 +445,7 @@ class MockSynthesizer(SpeechSynthesizer):
         # 生成模拟的静音音频
         await asyncio.sleep(0.2)  # 模拟处理时间
         
-        # 生成2秒的静音音频
+        # 生成音频时长
         sample_rate = 16000
         duration = min(len(text) / 5, 10)  # 最长10秒
         duration = max(duration, 1.0)  # 最短1秒
@@ -309,278 +457,55 @@ class MockSynthesizer(SpeechSynthesizer):
         processing_time = time.time() - start_time
         
         return {
-            "audio_data": audio_data,
+            "audio_data": base64.b64encode(audio_data).decode('utf-8'),
             "format": AudioFormat.PCM_16,
             "duration": duration,
             "processing_time": processing_time,
             "model_used": "mock_synthesizer"
         }
 
-class CosyVoiceSynthesizer(SpeechSynthesizer):
-    """CosyVoice 语音合成器"""
-    
-    async def _setup(self):
-        """设置 CosyVoice"""
-        try:
-            # 这里集成您之前创建的 CosyVoice MCP 客户端
-            # 或者直接导入 CosyVoice
-            import sys
-            sys.path.append('third_party/Matcha-TTS')
-            
-            from cosyvoice.cli.cosyvoice import CosyVoice2
-            from cosyvoice.utils.file_utils import load_wav
-            import torchaudio
-            
-            model_dir = self.config.get('model_dir', 'pretrained_models/CosyVoice2-0.5B')
-            
-            self.model = CosyVoice2(model_dir, load_jit=False, load_trt=False, fp16=False)
-            self.load_wav = load_wav
-            self.torchaudio = torchaudio
-            
-            logger.info("✅ CosyVoice 模型初始化成功")
-            
-        except ImportError:
-            logger.warning("⚠️ CosyVoice 未安装，使用模拟合成器")
-            self.model = None
-        except Exception as e:
-            logger.error(f"❌ CosyVoice 初始化失败: {str(e)}")
-            raise
-    
-    async def synthesize(self, 
-                        text: str, 
-                        voice: Optional[str] = None,
-                        language: str = "zh-CN",
-                        speed: float = 1.0,
-                        pitch: float = 1.0,
-                        **kwargs) -> Dict[str, Any]:
-        """CosyVoice 语音合成"""
-        start_time = time.time()
-        
-        try:
-            if self.model is None:
-                # 模拟合成结果
-                await asyncio.sleep(1.5)
-                
-                processing_time = time.time() - start_time
-                
-                # 创建模拟音频数据（静音）
-                sample_rate = 22050
-                duration = 2.0  # 2秒
-                audio_samples = int(sample_rate * duration)
-                mock_audio = b'\x00' * (audio_samples * 2)  # 16位PCM
-                
-                audio_base64 = base64.b64encode(mock_audio).decode('utf-8')
-                
-                return {
-                    "audio_data": audio_base64,
-                    "format": AudioFormat.WAV,
-                    "duration": duration,
-                    "processing_time": processing_time,
-                    "model_used": "mock_cosyvoice"
-                }
-            
-            # 使用预设的参考音频（需要提供）
-            reference_audio_path = self.config.get('reference_audio', 'reference.wav')
-            reference_text = self.config.get('reference_text', '参考音频文本')
-            
-            if not Path(reference_audio_path).exists():
-                # 如果没有参考音频，使用 SFT 模式（如果支持）
-                logger.warning("⚠️ 未找到参考音频，使用默认合成模式")
-                
-                # 模拟输出
-                processing_time = time.time() - start_time
-                mock_audio = b'\x00' * (22050 * 2 * 2)  # 2秒静音
-                audio_base64 = base64.b64encode(mock_audio).decode('utf-8')
-                
-                return {
-                    "audio_data": audio_base64,
-                    "format": AudioFormat.WAV,
-                    "duration": 2.0,
-                    "processing_time": processing_time,
-                    "model_used": "cosyvoice_sft"
-                }
-            
-            # 加载参考音频
-            reference_audio = self.load_wav(reference_audio_path, 16000)
-            
-            # 执行合成
-            output_audio = None
-            for i, result in enumerate(self.model.inference_zero_shot(
-                text, reference_text, reference_audio, stream=False
-            )):
-                output_audio = result['tts_speech']
-                break  # 只取第一个结果
-            
-            if output_audio is None:
-                raise Exception("合成失败，未生成音频")
-            
-            processing_time = time.time() - start_time
-            
-            # 转换为字节数据
-            import io
-            buffer = io.BytesIO()
-            self.torchaudio.save(buffer, output_audio, self.model.sample_rate, format='wav')
-            buffer.seek(0)
-            audio_data = buffer.read()
-            
-            # 编码为base64
-            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-            
-            # 计算时长
-            duration = output_audio.shape[1] / self.model.sample_rate
-            
-            log_speech_operation(
-                logger, "synthesis", "cosyvoice", 
-                len(text), len(audio_data), processing_time, 
-                True, language
-            )
-            
-            return {
-                "audio_data": audio_base64,
-                "format": AudioFormat.WAV,
-                "duration": duration,
-                "processing_time": processing_time,
-                "model_used": "cosyvoice"
-            }
-            
-        except Exception as e:
-            processing_time = time.time() - start_time
-            error_msg = str(e)
-            
-            log_speech_operation(
-                logger, "synthesis", "cosyvoice", 
-                len(text), 0, processing_time, 
-                False, language, error_msg
-            )
-            
-            raise Exception(f"CosyVoice 合成失败: {error_msg}")
-
-class EdgeTTSSynthesizer(SpeechSynthesizer):
-    """Edge TTS 语音合成器"""
-    
-    async def _setup(self):
-        """设置 Edge TTS"""
-        try:
-            import edge_tts
-            self.edge_tts = edge_tts
-            
-            logger.info("✅ Edge TTS 初始化成功")
-            
-        except ImportError:
-            logger.warning("⚠️ Edge TTS 未安装，使用模拟合成器")
-            self.edge_tts = None
-        except Exception as e:
-            logger.error(f"❌ Edge TTS 初始化失败: {str(e)}")
-            raise
-    
-    async def synthesize(self, 
-                        text: str, 
-                        voice: Optional[str] = None,
-                        language: str = "zh-CN",
-                        speed: float = 1.0,
-                        pitch: float = 1.0,
-                        **kwargs) -> Dict[str, Any]:
-        """Edge TTS 语音合成"""
-        start_time = time.time()
-        
-        try:
-            if self.edge_tts is None:
-                # 模拟合成结果
-                await asyncio.sleep(0.8)
-                
-                processing_time = time.time() - start_time
-                
-                # 创建模拟音频数据
-                mock_audio = b'\x00' * (16000 * 2 * 2)  # 2秒，16kHz，16位
-                audio_base64 = base64.b64encode(mock_audio).decode('utf-8')
-                
-                return {
-                    "audio_data": audio_base64,
-                    "format": AudioFormat.WAV,
-                    "duration": 2.0,
-                    "processing_time": processing_time,
-                    "model_used": "mock_edge_tts"
-                }
-            
-            # 选择声音
-            if not voice:
-                voice = self._get_default_voice(language)
-            
-            # 创建TTS实例
-            tts = self.edge_tts.Communicate(text, voice)
-            
-            # 生成音频
-            audio_data = b""
-            async for chunk in tts.stream():
-                if chunk["type"] == "audio":
-                    audio_data += chunk["data"]
-            
-            processing_time = time.time() - start_time
-            
-            # 编码为base64
-            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-            
-            # 估算时长（简单估算，实际可能需要解析音频文件）
-            duration = len(text) * 0.1  # 简单估算：每个字符0.1秒
-            
-            log_speech_operation(
-                logger, "synthesis", "edge_tts", 
-                len(text), len(audio_data), processing_time, 
-                True, language
-            )
-            
-            return {
-                "audio_data": audio_base64,
-                "format": AudioFormat.MP3,  # Edge TTS 默认输出MP3
-                "duration": duration,
-                "processing_time": processing_time,
-                "model_used": "edge_tts"
-            }
-            
-        except Exception as e:
-            processing_time = time.time() - start_time
-            error_msg = str(e)
-            
-            log_speech_operation(
-                logger, "synthesis", "edge_tts", 
-                len(text), 0, processing_time, 
-                False, language, error_msg
-            )
-            
-            raise Exception(f"Edge TTS 合成失败: {error_msg}")
-    
-    def _get_default_voice(self, language: str) -> str:
-        """获取默认声音"""
-        voice_map = {
-            "zh-CN": "zh-CN-XiaoxiaoNeural",
-            "zh-TW": "zh-TW-HsiaoyuNeural", 
-            "en-US": "en-US-AriaNeural",
-            "ja-JP": "ja-JP-NanamiNeural",
-            "ko-KR": "ko-KR-SunHiNeural"
-        }
-        return voice_map.get(language, "zh-CN-XiaoxiaoNeural")
-
 class SpeechProcessor:
-    """语音处理器主类"""
+    """语音处理器主类 - 优化版本"""
     
     def __init__(self):
-        self.recognizers: Dict[str, Any] = {}
-        self.synthesizers: Dict[str, Any] = {}
+        self.recognizers: Dict[str, SpeechRecognizer] = {}
+        self.synthesizers: Dict[str, SpeechSynthesizer] = {}
         self.default_recognizer = None
         self.default_synthesizer = None
         self.is_initialized = False
         
-        # 从环境变量或配置文件读取模型路径
-        self.cosyvoice_model_dir = os.getenv(
-            'COSYVOICE_MODEL_DIR', 
-            'pretrained_models/CosyVoice2-0.5B'
-        )
-        self.whisper_model_size = os.getenv('WHISPER_MODEL_SIZE', 'base')
-        self.device = os.getenv('SPEECH_DEVICE', 'cpu')
+        # 从环境变量或配置文件读取配置
+        self.config = self._load_config()
+
+    def _load_config(self) -> Dict[str, Any]:
+        """加载配置"""
+        return {
+            # CosyVoice 配置
+            'cosyvoice': {
+                'model_dir': os.getenv('COSYVOICE_MODEL_DIR', 'pretrained_models/CosyVoice2-0.5B'),
+                'cosyvoice_path': os.getenv('COSYVOICE_PATH', 'tools/CosyVoice'),
+                'reference_audio': os.getenv('COSYVOICE_REF_AUDIO', None),
+                'reference_text': os.getenv('COSYVOICE_REF_TEXT', '参考音频文本'),
+                'load_jit': os.getenv('COSYVOICE_LOAD_JIT', 'false').lower() == 'true',
+                'load_trt': os.getenv('COSYVOICE_LOAD_TRT', 'false').lower() == 'true',
+                'fp16': os.getenv('COSYVOICE_FP16', 'false').lower() == 'true'
+            },
+            # SenseVoice 配置
+            'sensevoice': {
+                'model': os.getenv('SENSEVOICE_MODEL', 'iic/SenseVoiceSmall'),
+                'max_single_segment_time': int(os.getenv('SENSEVOICE_MAX_SEGMENT_TIME', '60000')),
+                'batch_size_s': int(os.getenv('SENSEVOICE_BATCH_SIZE_S', '300')),
+                'batch_size_threshold_s': int(os.getenv('SENSEVOICE_BATCH_THRESHOLD_S', '60')),
+                'ncpu': int(os.getenv('SENSEVOICE_NCPU', '4')),
+                'batch_size': int(os.getenv('SENSEVOICE_BATCH_SIZE', '1'))
+            },
+            # 通用配置
+            'device': os.getenv('SPEECH_DEVICE', 'cpu')
+        }
 
     async def initialize(self):
         """初始化语音处理器"""
-        logger.info("🔧 初始化语音处理器")
+        logger.info("🔧 初始化语音处理器 - 优化版本")
         
         # 尝试初始化可用的识别器
         await self._try_initialize_recognizers()
@@ -595,134 +520,74 @@ class SpeechProcessor:
         
         logger.info(f"✅ 语音处理器初始化完成")
         logger.info(f"  - 可用识别器: {available_recognizers}")
+        logger.info(f"  - 默认识别器: {self.default_recognizer}")
         logger.info(f"  - 可用合成器: {available_synthesizers}")
+        logger.info(f"  - 默认合成器: {self.default_synthesizer}")
         
         if not available_recognizers and not available_synthesizers:
             logger.warning("⚠️ 没有可用的语音处理引擎，将使用模拟模式")
-    
 
     async def _try_initialize_recognizers(self):
         """尝试初始化语音识别器"""
         
-        # 尝试 SensVoice/FunASR
+        # 优先尝试 SenseVoice
         try:
-            from funasr import AutoModel
+            config = self.config['sensevoice'].copy()
+            config['device'] = self.config['device']
             
-            model = AutoModel(
-                model="paraformer-zh",
-                vad_model="fsmn-vad",
-                punc_model="ct-punc",
-                device=self.device
-            )
-            
-            self.recognizers['sensvoice'] = {
-                'model': model,
-                'type': 'sensvoice'
-            }
-            
-            if self.default_recognizer is None:
-                self.default_recognizer = 'sensvoice'
-            
-            logger.info("✅ SensVoice 识别器初始化成功")
-            
-        except ImportError:
-            logger.info("ℹ️ FunASR 未安装，跳过 SensVoice 识别器")
+            recognizer = SenseVoiceRecognizer(config)
+            if await recognizer.initialize():
+                self.recognizers['sensevoice'] = recognizer
+                if self.default_recognizer is None:
+                    self.default_recognizer = 'sensevoice'
+                logger.info("✅ SenseVoice 识别器初始化成功")
         except Exception as e:
-            logger.warning(f"⚠️ SensVoice 识别器初始化失败: {str(e)}")
-        
-        # 尝试 Whisper
-        try:
-            import whisper
-            
-            model = whisper.load_model(self.whisper_model_size)
-            
-            self.recognizers['whisper'] = {
-                'model': model,
-                'type': 'whisper'
-            }
-            
-            if self.default_recognizer is None:
-                self.default_recognizer = 'whisper'
-            
-            logger.info(f"✅ Whisper 识别器初始化成功 (模型: {self.whisper_model_size})")
-            
-        except ImportError:
-            logger.info("ℹ️ Whisper 未安装，跳过 Whisper 识别器")
-        except Exception as e:
-            logger.warning(f"⚠️ Whisper 识别器初始化失败: {str(e)}")
-        
+            logger.warning(f"⚠️ SenseVoice 识别器初始化失败: {str(e)}")
+    
         # 如果没有可用的识别器，添加模拟识别器
         if not self.recognizers:
-            self.recognizers['mock'] = {
-                'model': None,
-                'type': 'mock'
-            }
+            recognizer = SenseVoiceRecognizer({'device': 'cpu'})  # 模拟模式
+            await recognizer.initialize()
+            self.recognizers['mock'] = recognizer
             self.default_recognizer = 'mock'
             logger.info("✅ 模拟识别器已启用")
-    
 
     async def _try_initialize_synthesizers(self):
         """尝试初始化语音合成器"""
         
-        # 尝试 CosyVoice
+        # 优先尝试 CosyVoice
         try:
+            config = self.config['cosyvoice'].copy()
+            config['device'] = self.config['device']
+            
             # 检查模型目录是否存在
-            if Path(self.cosyvoice_model_dir).exists():
-                import sys
-                sys.path.append('third_party/Matcha-TTS')
-                
-                from cosyvoice.cli.cosyvoice import CosyVoice2
-                from cosyvoice.utils.file_utils import load_wav
-                import torchaudio
-                
-                model = CosyVoice2(self.cosyvoice_model_dir, load_jit=False, load_trt=False, fp16=False)
-                
-                self.synthesizers['cosyvoice'] = CosyVoiceSynthesizer({'model_dir': self.cosyvoice_model_dir})
-                await self.synthesizers['cosyvoice'].initialize()
-                
-                if self.default_synthesizer is None:
-                    self.default_synthesizer = 'cosyvoice'
-                
-                logger.info("✅ CosyVoice 合成器初始化成功")
+            if Path(config['model_dir']).exists():
+                synthesizer = CosyVoiceSynthesizer(config)
+                if await synthesizer.initialize():
+                    self.synthesizers['cosyvoice'] = synthesizer
+                    if self.default_synthesizer is None:
+                        self.default_synthesizer = 'cosyvoice'
+                    logger.info("✅ CosyVoice 合成器初始化成功")
             else:
-                logger.info(f"ℹ️ CosyVoice 模型目录不存在: {self.cosyvoice_model_dir}")
-                
-        except ImportError:
-            logger.info("ℹ️ CosyVoice 依赖未安装，跳过 CosyVoice 合成器")
+                logger.info(f"ℹ️ CosyVoice 模型目录不存在: {config['model_dir']}")
         except Exception as e:
             logger.warning(f"⚠️ CosyVoice 合成器初始化失败: {str(e)}")
         
-        # 尝试 Edge TTS
-        try:
-            import edge_tts
-            
-            self.synthesizers['edge_tts'] = EdgeTTSSynthesizer({})
-            await self.synthesizers['edge_tts'].initialize()
-            
-            if self.default_synthesizer is None:
-                self.default_synthesizer = 'edge_tts'
-            
-            logger.info("✅ Edge TTS 合成器初始化成功")
-            
-        except ImportError:
-            logger.info("ℹ️ Edge TTS 未安装，跳过 Edge TTS 合成器")
-        except Exception as e:
-            logger.warning(f"⚠️ Edge TTS 合成器初始化失败: {str(e)}")
-        
         # 如果没有可用的合成器，添加模拟合成器
         if not self.synthesizers:
-            self.synthesizers['mock'] = MockSynthesizer({})
-            await self.synthesizers['mock'].initialize()
+            synthesizer = MockSynthesizer({'device': 'cpu'})
+            await synthesizer.initialize()
+            self.synthesizers['mock'] = synthesizer
             self.default_synthesizer = 'mock'
             logger.info("✅ 模拟合成器已启用")
-    
 
     async def recognize(self, 
                        audio_data: bytes,
                        language: str = "zh-CN",
                        model_name: Optional[str] = None,
-                       request_id: Optional[str] = None) -> SpeechRecognitionResponse:
-        """语音识别 - 改进版"""
+                       request_id: Optional[str] = None,
+                       **kwargs) -> SpeechRecognitionResponse:
+        """语音识别 - 优化版"""
         if not self.is_initialized:
             raise RuntimeError("语音处理器未初始化")
         
@@ -738,7 +603,7 @@ class SpeechProcessor:
         try:
             logger.info(f"🎤 开始语音识别 - 模型: {recognizer_name}, 语言: {language}")
             
-            result = await self._perform_recognition(recognizer, audio_data, language)
+            result = await recognizer.recognize(audio_data, language, **kwargs)
             
             logger.info(f"✅ 语音识别完成 - 文本长度: {len(result['text'])}")
             
@@ -750,7 +615,8 @@ class SpeechProcessor:
                 processing_time=result["processing_time"],
                 model_used=result["model_used"],
                 request_id=request_id or generate_response_id(),
-                timestamp=datetime.utcnow()
+                timestamp=datetime.utcnow(),
+                segments=result.get("segments", [])
             )
             
         except Exception as e:
@@ -767,120 +633,7 @@ class SpeechProcessor:
                 timestamp=datetime.utcnow(),
                 message=f"识别失败: {str(e)}"
             )
-    
-    async def _perform_recognition(self, recognizer: Dict[str, Any], audio_data: bytes, language: str) -> Dict[str, Any]:
-        """执行具体的语音识别"""
-        start_time = time.time()
-        
-        if recognizer['type'] == 'mock':
-            # 模拟识别
-            await asyncio.sleep(0.5)
-            processing_time = time.time() - start_time
-            
-            return {
-                "text": "这是一个模拟的语音识别结果",
-                "language": language,
-                "confidence": 0.95,
-                "processing_time": processing_time,
-                "model_used": "mock_recognizer"
-            }
-        
-        elif recognizer['type'] == 'sensvoice':
-            return await self._sensvoice_recognize(recognizer, audio_data, language, start_time)
-        
-        elif recognizer['type'] == 'whisper':
-            return await self._whisper_recognize(recognizer, audio_data, language, start_time)
-        
-        else:
-            raise ValueError(f"未知的识别器类型: {recognizer['type']}")
-    
-    async def _sensvoice_recognize(self, recognizer: Dict[str, Any], audio_data: bytes, language: str, start_time: float) -> Dict[str, Any]:
-        """SensVoice 识别实现"""
-        model = recognizer['model']
-        
-        # 保存音频到临时文件
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-            temp_file.write(audio_data)
-            temp_audio_path = temp_file.name
-        
-        try:
-            # 执行识别
-            result = model.generate(input=temp_audio_path)
-            
-            processing_time = time.time() - start_time
-            
-            # 提取识别结果
-            if result and len(result) > 0:
-                text = result[0].get('text', '')
-                confidence = result[0].get('confidence', 0.0)
-            else:
-                text = ""
-                confidence = 0.0
-            
-            log_speech_operation(
-                logger, "recognition", "sensvoice", 
-                len(audio_data), len(text), processing_time, 
-                True, language
-            )
-            
-            return {
-                "text": text,
-                "language": language,
-                "confidence": confidence,
-                "processing_time": processing_time,
-                "model_used": "sensvoice"
-            }
-            
-        finally:
-            # 清理临时文件
-            Path(temp_audio_path).unlink(missing_ok=True)
-    
-    async def _whisper_recognize(self, recognizer: Dict[str, Any], audio_data: bytes, language: str, start_time: float) -> Dict[str, Any]:
-        """Whisper 识别实现"""
-        model = recognizer['model']
-        
-        # 保存音频到临时文件
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-            temp_file.write(audio_data)
-            temp_audio_path = temp_file.name
-        
-        try:
-            # 执行识别
-            result = model.transcribe(
-                temp_audio_path,
-                language=language if language != "zh-CN" else "zh"
-            )
-            
-            processing_time = time.time() - start_time
-            
-            text = result.get('text', '')
-            
-            # Whisper 不直接提供置信度，使用平均概率估算
-            segments = result.get('segments', [])
-            confidence = 0.0
-            if segments:
-                confidences = [seg.get('avg_logprob', 0.0) for seg in segments]
-                confidence = sum(confidences) / len(confidences)
-                confidence = max(0.0, min(1.0, (confidence + 1.0) / 2.0))
-            
-            log_speech_operation(
-                logger, "recognition", "whisper", 
-                len(audio_data), len(text), processing_time, 
-                True, language
-            )
-            
-            return {
-                "text": text,
-                "language": language,
-                "confidence": confidence,
-                "processing_time": processing_time,
-                "model_used": "whisper"
-            }
-            
-        finally:
-            # 清理临时文件
-            Path(temp_audio_path).unlink(missing_ok=True)
-    
+
     async def synthesize(self, 
                         text: str,
                         voice: Optional[str] = None,
@@ -888,8 +641,9 @@ class SpeechProcessor:
                         speed: float = 1.0,
                         pitch: float = 1.0,
                         tts_model: Optional[str] = None,
-                        request_id: Optional[str] = None) -> SpeechSynthesisResponse:
-        """语音合成"""
+                        request_id: Optional[str] = None,
+                        **kwargs) -> SpeechSynthesisResponse:
+        """语音合成 - 优化版"""
         if not self.is_initialized:
             raise RuntimeError("语音处理器未初始化")
         
@@ -903,34 +657,14 @@ class SpeechProcessor:
         try:
             logger.info(f"🔊 开始语音合成 - 模型: {synthesizer_name}, 文本长度: {len(text)}")
             
-            # 如果synthesizer是SpeechSynthesizer的实例，直接调用其synthesize方法
-            if isinstance(synthesizer, SpeechSynthesizer):
-                result = await synthesizer.synthesize(
-                    text=text,
-                    voice=voice,
-                    language=language,
-                    speed=speed,
-                    pitch=pitch
-                )
-            # 否则，按照原来的逻辑处理字典类型的synthesizer
-            else:
-                if synthesizer['type'] == 'cosyvoice':
-                    result = await self._cosyvoice_synthesize(synthesizer, text, voice, language, speed, pitch)
-                elif synthesizer['type'] == 'edge_tts':
-                    result = await self._edge_tts_synthesize(synthesizer, text, voice, language, speed, pitch)
-                elif synthesizer['type'] == 'mock':
-                    # 创建一个临时的MockSynthesizer来处理
-                    mock_synth = MockSynthesizer({})
-                    await mock_synth.initialize()
-                    result = await mock_synth.synthesize(
-                        text=text, 
-                        voice=voice, 
-                        language=language,
-                        speed=speed,
-                        pitch=pitch
-                    )
-                else:
-                    raise ValueError(f"未知的合成器类型: {synthesizer['type']}")
+            result = await synthesizer.synthesize(
+                text=text,
+                voice=voice,
+                language=language,
+                speed=speed,
+                pitch=pitch,
+                **kwargs
+            )
             
             logger.info(f"✅ 语音合成完成 - 音频时长: {result['duration']:.2f}s")
             
@@ -942,13 +676,15 @@ class SpeechProcessor:
                 processing_time=result["processing_time"],
                 model_used=result["model_used"],
                 request_id=request_id or generate_response_id(),
-                timestamp=datetime.utcnow()
+                timestamp=datetime.utcnow(),
+                synthesis_mode=result.get("synthesis_mode", "default"),
+                sample_rate=result.get("sample_rate", 16000)
             )
             
         except Exception as e:
             logger.error(f"❌ 语音合成失败: {str(e)}")
             raise
-    
+
     async def health_check(self) -> Dict[str, Any]:
         """健康检查"""
         try:
@@ -956,11 +692,18 @@ class SpeechProcessor:
                 "healthy": self.is_initialized and (len(self.recognizers) > 0 or len(self.synthesizers) > 0),
                 "recognizers": {
                     "available": list(self.recognizers.keys()),
-                    "default": self.default_recognizer
+                    "default": self.default_recognizer,
+                    "count": len(self.recognizers)
                 },
                 "synthesizers": {
                     "available": list(self.synthesizers.keys()),
-                    "default": self.default_synthesizer
+                    "default": self.default_synthesizer,
+                    "count": len(self.synthesizers)
+                },
+                "config": {
+                    "device": self.config['device'],
+                    "cosyvoice_model_dir": self.config['cosyvoice']['model_dir'],
+                    "sensevoice_model": self.config['sensevoice']['model']
                 }
             }
         
@@ -969,10 +712,42 @@ class SpeechProcessor:
                 "healthy": False,
                 "error": str(e)
             }
-    
+
+    async def get_available_voices(self, synthesizer_name: Optional[str] = None) -> Dict[str, List[str]]:
+        """获取可用的声音列表"""
+        voices = {}
+        
+        target_synthesizers = [synthesizer_name] if synthesizer_name else self.synthesizers.keys()
+        
+        for name in target_synthesizers:
+            if name in self.synthesizers:
+                synthesizer = self.synthesizers[name]
+                if hasattr(synthesizer, 'get_available_voices'):
+                    voices[name] = await synthesizer.get_available_voices()
+                else:
+                    voices[name] = ["default"]
+        
+        return voices
+
     async def cleanup(self):
         """清理资源"""
         logger.info("🧹 清理语音处理器资源")
+        
+        # 清理识别器
+        for recognizer in self.recognizers.values():
+            if hasattr(recognizer, 'cleanup'):
+                try:
+                    await recognizer.cleanup()
+                except Exception as e:
+                    logger.warning(f"清理识别器时出错: {str(e)}")
+        
+        # 清理合成器
+        for synthesizer in self.synthesizers.values():
+            if hasattr(synthesizer, 'cleanup'):
+                try:
+                    await synthesizer.cleanup()
+                except Exception as e:
+                    logger.warning(f"清理合成器时出错: {str(e)}")
         
         self.recognizers.clear()
         self.synthesizers.clear()
@@ -981,3 +756,19 @@ class SpeechProcessor:
         self.is_initialized = False
         
         logger.info("✅ 语音处理器资源清理完成")
+
+# 全局实例
+speech_processor = SpeechProcessor()
+
+# 便捷函数
+async def initialize_speech_processor():
+    """初始化全局语音处理器"""
+    await speech_processor.initialize()
+
+async def recognize_speech(audio_data: bytes, **kwargs) -> SpeechRecognitionResponse:
+    """便捷的语音识别函数"""
+    return await speech_processor.recognize(audio_data, **kwargs)
+
+async def synthesize_speech(text: str, **kwargs) -> SpeechSynthesisResponse:
+    """便捷的语音合成函数"""
+    return await speech_processor.synthesize(text, **kwargs)
