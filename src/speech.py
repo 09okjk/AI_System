@@ -22,6 +22,42 @@ from .utils import generate_response_id
 
 logger = get_logger(__name__)
 
+# 添加音频格式转换函数
+def convert_audio_to_wav(input_path: str, output_path: Optional[str] = None, sample_rate: int = 16000) -> str:
+    """
+    将任意音频格式转换为WAV格式
+    
+    Args:
+        input_path: 输入音频文件路径
+        output_path: 输出WAV文件路径，如果为None则生成一个临时文件
+        sample_rate: 输出音频的采样率
+        
+    Returns:
+        WAV文件的路径
+    """
+    try:
+        import librosa
+        import soundfile as sf
+        
+        # 如果未指定输出路径，创建临时文件
+        if not output_path:
+            temp_dir = Path(tempfile.gettempdir()) / "ai_system_audio"
+            temp_dir.mkdir(exist_ok=True)
+            output_path = str(temp_dir / f"{uuid.uuid4()}.wav")
+        
+        # 加载音频文件
+        logger.info(f"正在转换音频: {input_path} -> {output_path}")
+        y, sr = librosa.load(input_path, sr=sample_rate)
+        
+        # 保存为WAV格式
+        sf.write(output_path, y, sample_rate, subtype='PCM_16')
+        logger.info(f"音频转换完成: {output_path}")
+        
+        return output_path
+    except Exception as e:
+        logger.error(f"音频格式转换失败: {str(e)}")
+        raise
+
 class SpeechRecognizer:
     """语音识别器基类"""    
     def __init__(self, config: Dict[str, Any]):
@@ -359,6 +395,16 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         if not reference_audio_path or not Path(reference_audio_path).exists():
             raise FileNotFoundError(f"参考音频文件不存在: {reference_audio_path}")
         
+        # 检查是否需要转换音频格式
+        reference_audio_ext = Path(reference_audio_path).suffix.lower()
+        if reference_audio_ext != '.wav':
+            logger.info(f"参考音频非WAV格式 ({reference_audio_ext})，进行格式转换")
+            try:
+                reference_audio_path = convert_audio_to_wav(reference_audio_path, sample_rate=self.model.sample_rate)
+            except Exception as e:
+                logger.error(f"参考音频转换失败: {str(e)}")
+                raise ValueError(f"参考音频格式转换失败: {str(e)}")
+        
         # 加载参考音频
         reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
         
@@ -384,6 +430,16 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         
         if not reference_audio_path or not Path(reference_audio_path).exists():
             raise FileNotFoundError(f"参考音频文件不存在: {reference_audio_path}")
+        
+        # 检查是否需要转换音频格式
+        reference_audio_ext = Path(reference_audio_path).suffix.lower()
+        if reference_audio_ext != '.wav':
+            logger.info(f"参考音频非WAV格式 ({reference_audio_ext})，进行格式转换")
+            try:
+                reference_audio_path = convert_audio_to_wav(reference_audio_path, sample_rate=self.model.sample_rate)
+            except Exception as e:
+                logger.error(f"参考音频转换失败: {str(e)}")
+                raise ValueError(f"参考音频格式转换失败: {str(e)}")
         
         # 加载参考音频
         reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
@@ -412,6 +468,16 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         if not reference_audio_path or not Path(reference_audio_path).exists():
             raise FileNotFoundError(f"参考音频文件不存在: {reference_audio_path}")
         
+        # 检查是否需要转换音频格式
+        reference_audio_ext = Path(reference_audio_path).suffix.lower()
+        if reference_audio_ext != '.wav':
+            logger.info(f"参考音频非WAV格式 ({reference_audio_ext})，进行格式转换")
+            try:
+                reference_audio_path = convert_audio_to_wav(reference_audio_path, sample_rate=self.model.sample_rate)
+            except Exception as e:
+                logger.error(f"参考音频转换失败: {str(e)}")
+                raise ValueError(f"参考音频格式转换失败: {str(e)}")
+        
         # 加载参考音频
         reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
         
@@ -437,23 +503,37 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         
         # 转换为字节数据
         buffer = io.BytesIO()
-        self.torchaudio.save(buffer, output_audio, self.model.sample_rate, format='wav')
-        buffer.seek(0)
-        audio_data = buffer.read()
         
-        # 编码为base64
-        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-        
-        # 计算时长
-        duration = output_audio.shape[1] / self.model.sample_rate
-        
-        return {
-            "audio_data": audio_base64,
-            "format": AudioFormat.WAV,
-            "duration": duration,
-            "model_used": "cosyvoice",
-            "sample_rate": self.model.sample_rate
-        }
+        try:
+            # 明确指定音频格式和位深度
+            self.torchaudio.save(
+                buffer, 
+                output_audio, 
+                self.model.sample_rate, 
+                format='wav',
+                bits_per_sample=16,
+                encoding='PCM_S'
+            )
+            buffer.seek(0)
+            audio_data = buffer.read()
+            
+            # 编码为base64
+            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+            
+            # 计算时长
+            duration = output_audio.shape[1] / self.model.sample_rate
+            
+            return {
+                "audio_data": audio_base64,
+                "format": AudioFormat.WAV,
+                "duration": duration,
+                "model_used": "cosyvoice",
+                "sample_rate": self.model.sample_rate
+            }
+        except Exception as e:
+            # 提供更详细的错误信息
+            logger.error(f"❌ 音频处理失败: {str(e)}")
+            raise Exception(f"音频处理失败: {str(e)}")
 
 class MockSynthesizer(SpeechSynthesizer):
     """模拟语音合成器"""
@@ -585,7 +665,7 @@ class SpeechProcessor:
     async def _try_initialize_synthesizers(self):
         """尝试初始化语音合成器"""
         
-        # 优先尝试 CosyVoice
+        # 只初始化 CosyVoice
         try:
             config = self.config['cosyvoice'].copy()
             config['device'] = self.config['device']
@@ -595,21 +675,17 @@ class SpeechProcessor:
                 synthesizer = CosyVoiceSynthesizer(config)
                 if await synthesizer.initialize():
                     self.synthesizers['cosyvoice'] = synthesizer
-                    if self.default_synthesizer is None:
-                        self.default_synthesizer = 'cosyvoice'
+                    self.default_synthesizer = 'cosyvoice'
                     logger.info("✅ CosyVoice 合成器初始化成功")
+                else:
+                    logger.error("❌ CosyVoice 合成器初始化失败")
+                    raise RuntimeError("CosyVoice 合成器初始化失败")
             else:
-                logger.info(f"ℹ️ CosyVoice 模型目录不存在: {config['model_dir']}")
+                logger.error(f"❌ CosyVoice 模型目录不存在: {config['model_dir']}")
+                raise FileNotFoundError(f"CosyVoice 模型目录不存在: {config['model_dir']}")
         except Exception as e:
-            logger.warning(f"⚠️ CosyVoice 合成器初始化失败: {str(e)}")
-        
-        # 如果没有可用的合成器，添加模拟合成器
-        if not self.synthesizers:
-            synthesizer = MockSynthesizer({'device': 'cpu'})
-            await synthesizer.initialize()
-            self.synthesizers['mock'] = synthesizer
-            self.default_synthesizer = 'mock'
-            logger.info("✅ 模拟合成器已启用")
+            logger.error(f"❌ CosyVoice 合成器初始化失败: {str(e)}")
+            raise
 
     async def recognize(self, 
                        audio_data: bytes,
@@ -677,10 +753,10 @@ class SpeechProcessor:
         if not self.is_initialized:
             raise RuntimeError("语音处理器未初始化")
         
-        # 选择合成器
-        synthesizer_name = tts_model or self.default_synthesizer
+        # 强制使用CosyVoice合成器，忽略其他设置
+        synthesizer_name = 'cosyvoice'
         if synthesizer_name not in self.synthesizers:
-            raise ValueError(f"语音合成器不可用: {synthesizer_name}")
+            raise ValueError(f"CosyVoice语音合成器不可用，请确保CosyVoice2-0.5b模型已安装")
         
         synthesizer = self.synthesizers[synthesizer_name]
         
