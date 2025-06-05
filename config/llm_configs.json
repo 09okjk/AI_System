@@ -21,7 +21,7 @@
       "id": "local_xinference",
       "name": "本地Xinference模型",
       "provider": "xinference",
-      "model_name": "qwen3-8b",
+      "model_name": "qwen3_8b",
       "api_key": "xinference",
       "base_url": "http://localhost:9997/v1",
       "max_tokens": 2000,
