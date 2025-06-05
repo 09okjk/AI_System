@@ -16,6 +16,14 @@ from .models import MCPConfigResponse, LLMConfigResponse
 
 logger = get_logger(__name__)
 
+# 添加自定义JSON编码器来处理datetime对象
+class DateTimeEncoder(json.JSONEncoder):
+    """自定义JSON编码器，用于处理datetime对象"""
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
 class ConfigManager:
     """配置管理器"""
     
@@ -125,7 +133,7 @@ class ConfigManager:
         """保存应用配置"""
         try:
             with open(self.app_config_file, 'w', encoding='utf-8') as f:
-                json.dump(self.app_config, f, indent=2, ensure_ascii=False)
+                json.dump(self.app_config, f, indent=2, ensure_ascii=False, cls=DateTimeEncoder)
             logger.debug("💾 应用配置已保存")
         except Exception as e:
             logger.error(f"❌ 保存应用配置失败: {e}")
@@ -135,7 +143,7 @@ class ConfigManager:
         """保存MCP配置"""
         try:
             with open(self.mcp_config_file, 'w', encoding='utf-8') as f:
-                json.dump(self.mcp_configs, f, indent=2, ensure_ascii=False)
+                json.dump(self.mcp_configs, f, indent=2, ensure_ascii=False, cls=DateTimeEncoder)
             logger.debug("💾 MCP配置已保存")
         except Exception as e:
             logger.error(f"❌ 保存MCP配置失败: {e}")
@@ -145,7 +153,7 @@ class ConfigManager:
         """保存LLM配置"""
         try:
             with open(self.llm_config_file, 'w', encoding='utf-8') as f:
-                json.dump(self.llm_configs, f, indent=2, ensure_ascii=False)
+                json.dump(self.llm_configs, f, indent=2, ensure_ascii=False, cls=DateTimeEncoder)
             logger.debug("💾 LLM配置已保存")
         except Exception as e:
             logger.error(f"❌ 保存LLM配置失败: {e}")

@@ -277,6 +277,45 @@ class SpeechSynthesizer:
         """合成语音（由子类实现）"""
         raise NotImplementedError
 
+class MockSynthesizer(SpeechSynthesizer):
+    """模拟语音合成器"""
+    
+    async def _setup(self):
+        """设置模拟合成器"""
+        logger.info("✅ 模拟合成器设置成功")
+    
+    async def synthesize(self, 
+                       text: str, 
+                       voice: Optional[str] = None,
+                       language: str = "zh-CN",
+                       speed: float = 1.0,
+                       pitch: float = 1.0,
+                       **kwargs) -> Dict[str, Any]:
+        """模拟语音合成"""
+        start_time = time.time()
+        
+        # 生成模拟的静音音频
+        await asyncio.sleep(0.2)  # 模拟处理时间
+        
+        # 生成2秒的静音音频
+        sample_rate = 16000
+        duration = min(len(text) / 5, 10)  # 最长10秒
+        duration = max(duration, 1.0)  # 最短1秒
+        
+        # 创建静音音频
+        samples = int(duration * sample_rate)
+        audio_data = bytes(samples * 2)  # 16-bit PCM
+        
+        processing_time = time.time() - start_time
+        
+        return {
+            "audio_data": audio_data,
+            "format": AudioFormat.PCM_16,
+            "duration": duration,
+            "processing_time": processing_time,
+            "model_used": "mock_synthesizer"
+        }
+
 class CosyVoiceSynthesizer(SpeechSynthesizer):
     """CosyVoice 语音合成器"""
     
@@ -638,12 +677,8 @@ class SpeechProcessor:
                 
                 model = CosyVoice2(self.cosyvoice_model_dir, load_jit=False, load_trt=False, fp16=False)
                 
-                self.synthesizers['cosyvoice'] = {
-                    'model': model,
-                    'load_wav': load_wav,
-                    'torchaudio': torchaudio,
-                    'type': 'cosyvoice'
-                }
+                self.synthesizers['cosyvoice'] = CosyVoiceSynthesizer({'model_dir': self.cosyvoice_model_dir})
+                await self.synthesizers['cosyvoice'].initialize()
                 
                 if self.default_synthesizer is None:
                     self.default_synthesizer = 'cosyvoice'
@@ -661,10 +696,8 @@ class SpeechProcessor:
         try:
             import edge_tts
             
-            self.synthesizers['edge_tts'] = {
-                'model': edge_tts,
-                'type': 'edge_tts'
-            }
+            self.synthesizers['edge_tts'] = EdgeTTSSynthesizer({})
+            await self.synthesizers['edge_tts'].initialize()
             
             if self.default_synthesizer is None:
                 self.default_synthesizer = 'edge_tts'
@@ -678,10 +711,8 @@ class SpeechProcessor:
         
         # 如果没有可用的合成器，添加模拟合成器
         if not self.synthesizers:
-            self.synthesizers['mock'] = {
-                'model': None,
-                'type': 'mock'
-            }
+            self.synthesizers['mock'] = MockSynthesizer({})
+            await self.synthesizers['mock'].initialize()
             self.default_synthesizer = 'mock'
             logger.info("✅ 模拟合成器已启用")
     
@@ -872,13 +903,34 @@ class SpeechProcessor:
         try:
             logger.info(f"🔊 开始语音合成 - 模型: {synthesizer_name}, 文本长度: {len(text)}")
             
-            result = await synthesizer.synthesize(
-                text=text,
-                voice=voice,
-                language=language,
-                speed=speed,
-                pitch=pitch
-            )
+            # 如果synthesizer是SpeechSynthesizer的实例，直接调用其synthesize方法
+            if isinstance(synthesizer, SpeechSynthesizer):
+                result = await synthesizer.synthesize(
+                    text=text,
+                    voice=voice,
+                    language=language,
+                    speed=speed,
+                    pitch=pitch
+                )
+            # 否则，按照原来的逻辑处理字典类型的synthesizer
+            else:
+                if synthesizer['type'] == 'cosyvoice':
+                    result = await self._cosyvoice_synthesize(synthesizer, text, voice, language, speed, pitch)
+                elif synthesizer['type'] == 'edge_tts':
+                    result = await self._edge_tts_synthesize(synthesizer, text, voice, language, speed, pitch)
+                elif synthesizer['type'] == 'mock':
+                    # 创建一个临时的MockSynthesizer来处理
+                    mock_synth = MockSynthesizer({})
+                    await mock_synth.initialize()
+                    result = await mock_synth.synthesize(
+                        text=text, 
+                        voice=voice, 
+                        language=language,
+                        speed=speed,
+                        pitch=pitch
+                    )
+                else:
+                    raise ValueError(f"未知的合成器类型: {synthesizer['type']}")
             
             logger.info(f"✅ 语音合成完成 - 音频时长: {result['duration']:.2f}s")
             
