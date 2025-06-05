@@ -19,6 +19,23 @@ from .utils import (
     cache,
     rate_limiter
 )
+# 添加对 models 模块中类的导入
+from .models import (
+    HealthResponse, 
+    SystemStatusResponse, 
+    SpeechRecognitionResponse,
+    SpeechSynthesisResponse, 
+    SpeechSynthesisRequest, 
+    VoiceChatResponse,
+    ChatRequest, 
+    ChatResponse,
+    MCPConfigCreate, 
+    MCPConfigUpdate, 
+    MCPConfigResponse,
+    LLMConfigCreate, 
+    LLMConfigUpdate, 
+    LLMConfigResponse
+)
 
 __all__ = [
     "ConfigManager",
@@ -32,5 +49,20 @@ __all__ = [
     "validate_config",
     "session_manager",
     "cache",
-    "rate_limiter"
+    "rate_limiter",
+    # 添加 models 模块中的类
+    "HealthResponse",
+    "SystemStatusResponse",
+    "SpeechRecognitionResponse",
+    "SpeechSynthesisResponse",
+    "SpeechSynthesisRequest",
+    "VoiceChatResponse",
+    "ChatRequest",
+    "ChatResponse",
+    "MCPConfigCreate",
+    "MCPConfigUpdate",
+    "MCPConfigResponse",
+    "LLMConfigCreate",
+    "LLMConfigUpdate",
+    "LLMConfigResponse"
 ]
