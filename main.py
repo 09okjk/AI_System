@@ -98,9 +98,11 @@ def get_managers():
             'LLMConfigUpdate': LLMConfigUpdate,
             'LLMConfigResponse': LLMConfigResponse
         }
-    except ImportError as e:
-        # 如果导入失败，返回一个包含错误信息的字典
-        return {'error': f"导入失败: {str(e)}"}
+    except Exception as e:
+        import traceback
+        error_msg = f"导入失败: {str(e)}\n{traceback.format_exc()}"
+        print(f"❌ 详细导入错误: {error_msg}")
+        return {'error': error_msg}
 
 # 创建 FastAPI 应用
 app = FastAPI(
