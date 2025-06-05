@@ -8,14 +8,11 @@ AI Agent 后端服务主入口
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-import logging
-import asyncio
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-import json
-import os
 from pathlib import Path
 import sys
+from src.models import SystemStatusResponse 
 
 # 确保项目根目录在 Python 路径中
 project_root = Path(__file__).parent
@@ -34,7 +31,7 @@ def get_managers():
         from src.models import (
             LLMConfigCreate, LLMConfigUpdate, LLMConfigResponse, 
             MCPConfigCreate, MCPConfigUpdate, MCPConfigResponse,
-            HealthResponse, SystemStatusResponse, SpeechRecognitionResponse,
+            HealthResponse, SpeechRecognitionResponse,
             SpeechSynthesisResponse, SpeechSynthesisRequest, VoiceChatResponse,
             ChatRequest, ChatResponse
         )
@@ -51,7 +48,6 @@ def get_managers():
             'generate_response_id': generate_response_id,
             # 导出所有响应模型
             'HealthResponse': HealthResponse,
-            'SystemStatusResponse': SystemStatusResponse,
             'SpeechRecognitionResponse': SpeechRecognitionResponse,
             'SpeechSynthesisResponse': SpeechSynthesisResponse,
             'SpeechSynthesisRequest': SpeechSynthesisRequest,
