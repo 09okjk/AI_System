@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import sys
+from src.utils import validate_config, generate_response_id
 from src.models import (
             LLMConfigCreate, LLMConfigUpdate, LLMConfigResponse, 
             MCPConfigCreate, MCPConfigUpdate, MCPConfigResponse,
@@ -34,7 +35,6 @@ def get_managers():
         from src.llm import LLMManager
         from src.speech import SpeechProcessor
         from src.logger import setup_logger, get_logger
-        from src.utils import validate_config, generate_response_id
         
         return {
             'ConfigManager': ConfigManager,
