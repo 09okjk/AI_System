@@ -1,521 +1,300 @@
-(简体中文|[English](./README.md))
+# SensVoice/FunASR MCP服务器
 
-FunASR开源了大量在工业数据上预训练模型，您可以在 [模型许可协议](https://github.com/alibaba-damo-academy/FunASR/blob/main/MODEL_LICENSE)下自由使用、复制、修改和分享FunASR模型，下面列举代表性的模型，更多模型请参考 [模型仓库](https://github.com/alibaba-damo-academy/FunASR/tree/main/model_zoo)。
+基于Model Context Protocol (MCP) 的SensVoice/FunASR语音识别服务器，提供全面的语音处理功能。
 
-<div align="center">  
-<h4>
- <a href="#模型推理"> 模型推理 </a>   
-｜<a href="#模型训练与测试"> 模型训练与测试 </a>
-｜<a href="#模型导出与测试"> 模型导出与测试 </a>
-｜<a href="#新模型注册教程"> 新模型注册教程 </a>
-</h4>
-</div>
+## 功能特性
 
-<a name="模型推理"></a>
+- **语音识别** (ASR): 支持中文、英文等多语言语音识别
+- **语音端点检测** (VAD): 检测语音的起始和结束时间点
+- **标点恢复**: 为识别文本添加标点符号
+- **实时处理**: 支持流式语音识别和VAD检测
+- **时间戳预测**: 预测文本与音频的对齐时间戳
+- **多模型支持**: 可同时加载和使用多个模型
+- **WebSocket协议**: 支持远程访问和实时通信
 
-## 模型推理
+## 安装要求
 
-### 快速使用
-
-命令行方式调用：
-
-```shell
-funasr ++model=paraformer-zh ++vad_model="fsmn-vad" ++punc_model="ct-punc" ++input=asr_example_zh.wav
-```
-
-python代码调用（推荐）
-
-```python
-from funasr import AutoModel
-
-model = AutoModel(model="paraformer-zh")
-
-res = model.generate(input="https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/vad_example.wav")
-print(res)
-```
-
-### 接口说明
-
-#### AutoModel 定义
-```python
-model = AutoModel(model=[str], device=[str], ncpu=[int], output_dir=[str], batch_size=[int], hub=[str], **kwargs)
-```
-- `model`(str): [模型仓库](https://github.com/alibaba-damo-academy/FunASR/tree/main/model_zoo) 中的模型名称，或本地磁盘中的模型路径
-- `device`(str): `cuda:0`（默认gpu0），使用 GPU 进行推理，指定。如果为`cpu`，则使用 CPU 进行推理。`mps`：mac电脑M系列新品试用mps进行推理。`xpu`：使用英特尔gpu进行推理。
-- `ncpu`(int): `4` （默认），设置用于 CPU 内部操作并行性的线程数
-- `output_dir`(str): `None` （默认），如果设置，输出结果的输出路径
-- `batch_size`(int): `1` （默认），解码时的批处理，样本个数
-- `hub`(str)：`ms`（默认），从modelscope下载模型。如果为`hf`，从huggingface下载模型。
-- `**kwargs`(dict): 所有在`config.yaml`中参数，均可以直接在此处指定，例如，vad模型中最大切割长度 `max_single_segment_time=6000` （毫秒）。
-
-#### AutoModel 推理
-```python
-res = model.generate(input=[str], output_dir=[str])
-```
-- `input`: 要解码的输入，可以是：
-  - wav文件路径, 例如: asr_example.wav
-  - pcm文件路径, 例如: asr_example.pcm，此时需要指定音频采样率fs（默认为16000）
-  - 音频字节数流，例如：麦克风的字节数数据
-  - wav.scp，kaldi 样式的 wav 列表 (`wav_id \t wav_path`), 例如:
-  ```text
-  asr_example1  ./audios/asr_example1.wav
-  asr_example2  ./audios/asr_example2.wav
-  ```
-  在这种输入 `wav.scp` 的情况下，必须设置 `output_dir` 以保存输出结果
-  - 音频采样点，例如：`audio, rate = soundfile.read("asr_example_zh.wav")`, 数据类型为 numpy.ndarray。支持batch输入，类型为list：
-  ```[audio_sample1, audio_sample2, ..., audio_sampleN]```
-  - fbank输入，支持组batch。shape为[batch, frames, dim]，类型为torch.Tensor，例如
-- `output_dir`: None （默认），如果设置，输出结果的输出路径
-- `**kwargs`(dict): 与模型相关的推理参数，例如，`beam_size=10`，`decoding_ctc_weight=0.1`。
-
-
-### 更多用法介绍
-
-
-#### 非实时语音识别
-```python
-from funasr import AutoModel
-# paraformer-zh is a multi-functional asr model
-# use vad, punc, spk or not as you need
-model = AutoModel(model="paraformer-zh",  
-                  vad_model="fsmn-vad", 
-                  vad_kwargs={"max_single_segment_time": 60000},
-                  punc_model="ct-punc", 
-                  # spk_model="cam++"
-                  )
-wav_file = f"{model.model_path}/example/asr_example.wav"
-res = model.generate(input=wav_file, batch_size_s=300, batch_size_threshold_s=60, hotword='魔搭')
-print(res)
-```
-注意：
-- 通常模型输入限制时长30s以下，组合`vad_model`后，支持任意时长音频输入，不局限于paraformer模型，所有音频输入模型均可以。
-- `model`相关的参数可以直接在`AutoModel`定义中直接指定；与`vad_model`相关参数可以通过`vad_kwargs`来指定，类型为dict；类似的有`punc_kwargs`，`spk_kwargs`；
-- `max_single_segment_time`: 表示`vad_model`最大切割音频时长, 单位是毫秒ms.
-- `batch_size_s` 表示采用动态batch，batch中总音频时长，单位为秒s。
-- `batch_size_threshold_s`: 表示`vad_model`切割后音频片段时长超过 `batch_size_threshold_s`阈值时，将batch_size数设置为1, 单位为秒s.
-
-建议：当您输入为长音频，遇到OOM问题时，因为显存占用与音频时长呈平方关系增加，分为3种情况：
-- a)推理起始阶段，显存主要取决于`batch_size_s`，适当减小该值，可以减少显存占用；
-- b)推理中间阶段，遇到VAD切割的长音频片段，总token数小于`batch_size_s`，仍然出现OOM，可以适当减小`batch_size_threshold_s`，超过阈值，强制batch为1; 
-- c)推理快结束阶段，遇到VAD切割的长音频片段，总token数小于`batch_size_s`，且超过阈值`batch_size_threshold_s`，强制batch为1，仍然出现OOM，可以适当减小`max_single_segment_time`，使得VAD切割音频时长变短。
-
-#### 实时语音识别
-
-```python
-from funasr import AutoModel
-
-chunk_size = [0, 10, 5] #[0, 10, 5] 600ms, [0, 8, 4] 480ms
-encoder_chunk_look_back = 4 #number of chunks to lookback for encoder self-attention
-decoder_chunk_look_back = 1 #number of encoder chunks to lookback for decoder cross-attention
-
-model = AutoModel(model="paraformer-zh-streaming")
-
-import soundfile
-import os
-
-wav_file = os.path.join(model.model_path, "example/asr_example.wav")
-speech, sample_rate = soundfile.read(wav_file)
-chunk_stride = chunk_size[1] * 960 # 600ms
-
-cache = {}
-total_chunk_num = int(len((speech)-1)/chunk_stride+1)
-for i in range(total_chunk_num):
-    speech_chunk = speech[i*chunk_stride:(i+1)*chunk_stride]
-    is_final = i == total_chunk_num - 1
-    res = model.generate(input=speech_chunk, cache=cache, is_final=is_final, chunk_size=chunk_size, encoder_chunk_look_back=encoder_chunk_look_back, decoder_chunk_look_back=decoder_chunk_look_back)
-    print(res)
-```
-
-注：`chunk_size`为流式延时配置，`[0,10,5]`表示上屏实时出字粒度为`10*60=600ms`，未来信息为`5*60=300ms`。每次推理输入为`600ms`（采样点数为`16000*0.6=960`），输出为对应文字，最后一个语音片段输入需要设置`is_final=True`来强制输出最后一个字。
-
-#### 语音端点检测（非实时）
-```python
-from funasr import AutoModel
-
-model = AutoModel(model="fsmn-vad")
-
-wav_file = f"{model.model_path}/example/vad_example.wav"
-res = model.generate(input=wav_file)
-print(res)
-```
-注：VAD模型输出格式为：`[[beg1, end1], [beg2, end2], .., [begN, endN]]`，其中`begN/endN`表示第`N`个有效音频片段的起始点/结束点，
-单位为毫秒。
-
-#### 语音端点检测（实时）
-```python
-from funasr import AutoModel
-
-chunk_size = 200 # ms
-model = AutoModel(model="fsmn-vad")
-
-import soundfile
-
-wav_file = f"{model.model_path}/example/vad_example.wav"
-speech, sample_rate = soundfile.read(wav_file)
-chunk_stride = int(chunk_size * sample_rate / 1000)
-
-cache = {}
-total_chunk_num = int(len((speech)-1)/chunk_stride+1)
-for i in range(total_chunk_num):
-    speech_chunk = speech[i*chunk_stride:(i+1)*chunk_stride]
-    is_final = i == total_chunk_num - 1
-    res = model.generate(input=speech_chunk, cache=cache, is_final=is_final, chunk_size=chunk_size)
-    if len(res[0]["value"]):
-        print(res)
-```
-注：流式VAD模型输出格式为4种情况：
-- `[[beg1, end1], [beg2, end2], .., [begN, endN]]`：同上离线VAD输出结果。
-- `[[beg, -1]]`：表示只检测到起始点。
-- `[[-1, end]]`：表示只检测到结束点。
-- `[]`：表示既没有检测到起始点，也没有检测到结束点
-输出结果单位为毫秒，从起始点开始的绝对时间。
-
-#### 标点恢复
-```python
-from funasr import AutoModel
-
-model = AutoModel(model="ct-punc")
-
-res = model.generate(input="那今天的会就到这里吧 happy new year 明年见")
-print(res)
-```
-
-#### 时间戳预测
-```python
-from funasr import AutoModel
-
-model = AutoModel(model="fa-zh")
-
-wav_file = f"{model.model_path}/example/asr_example.wav"
-text_file = f"{model.model_path}/example/text.txt"
-res = model.generate(input=(wav_file, text_file), data_type=("sound", "text"))
-print(res)
-```
-更多（[示例](https://github.com/alibaba-damo-academy/FunASR/tree/main/examples/industrial_data_pretraining)）
-
-<a name="核心功能"></a>
-## 模型训练与测试
-
-### 快速开始
-
-命令行执行（用于快速测试，不推荐）：
-```shell
-funasr-train ++model=paraformer-zh ++train_data_set_list=data/list/train.jsonl ++valid_data_set_list=data/list/val.jsonl ++output_dir="./outputs" &> log.txt &
-```
-
-python代码执行（可以多机多卡，推荐）
-
-```shell
-cd examples/industrial_data_pretraining/paraformer
-bash finetune.sh
-# "log_file: ./outputs/log.txt"
-```
-详细完整的脚本参考 [finetune.sh](https://github.com/alibaba-damo-academy/FunASR/blob/main/examples/industrial_data_pretraining/paraformer/finetune.sh)
-
-### 详细参数介绍
-
-```shell
-funasr/bin/train_ds.py \
-++model="${model_name_or_model_dir}" \
-++train_data_set_list="${train_data}" \
-++valid_data_set_list="${val_data}" \
-++dataset_conf.batch_size=20000 \
-++dataset_conf.batch_type="token" \
-++dataset_conf.num_workers=4 \
-++train_conf.max_epoch=50 \
-++train_conf.log_interval=1 \
-++train_conf.resume=false \
-++train_conf.validate_interval=2000 \
-++train_conf.save_checkpoint_interval=2000 \
-++train_conf.keep_nbest_models=20 \
-++train_conf.avg_nbest_model=10 \
-++optim_conf.lr=0.0002 \
-++output_dir="${output_dir}" &> ${log_file}
-```
-
-- `model`（str）：模型名字（模型仓库中的ID），此时脚本会自动下载模型到本地；或者本地已经下载好的模型路径。
-- `train_data_set_list`（str）：训练数据路径，默认为jsonl格式，具体参考（[例子](https://github.com/alibaba-damo-academy/FunASR/blob/main/data/list)）。
-- `valid_data_set_list`（str）：验证数据路径，默认为jsonl格式，具体参考（[例子](https://github.com/alibaba-damo-academy/FunASR/blob/main/data/list)）。
-- `dataset_conf.batch_type`（str）：`example`（默认），batch的类型。`example`表示按照固定数目batch_size个样本组batch；`length` or `token` 表示动态组batch，batch总长度或者token数为batch_size。
-- `dataset_conf.batch_size`（int）：与 `batch_type` 搭配使用，当 `batch_type=example` 时，表示样本个数；当 `batch_type=length` 时，表示样本中长度，单位为fbank帧数（1帧10ms）或者文字token个数。
-- `train_conf.max_epoch`（int）：`100`（默认），训练总epoch数。
-- `train_conf.log_interval`（int）：`50`（默认），打印日志间隔step数。
-- `train_conf.resume`（int）：`True`（默认），是否开启断点重训。
-- `train_conf.validate_interval`（int）：`5000`（默认），训练中做验证测试的间隔step数。
-- `train_conf.save_checkpoint_interval`（int）：`5000`（默认），训练中模型保存间隔step数。
-- `train_conf.avg_keep_nbest_models_type`（str）：`acc`（默认），保留nbest的标准为acc（越大越好）。`loss`表示，保留nbest的标准为loss（越小越好）。
-- `train_conf.keep_nbest_models`（int）：`500`（默认），保留最大多少个模型参数，配合 `avg_keep_nbest_models_type` 按照验证集 acc/loss 保留最佳的n个模型，其他删除，节约存储空间。
-- `train_conf.avg_nbest_model`（int）：`10`（默认），保留最大多少个模型参数，配合 `avg_keep_nbest_models_type` 按照验证集 acc/loss 对最佳的n个模型平均。
-- `train_conf.accum_grad`（int）：`1`（默认），梯度累积功能。
-- `train_conf.grad_clip`（float）：`10.0`（默认），梯度截断功能。
-- `train_conf.use_fp16`（bool）：`False`（默认），开启fp16训练，加快训练速度。
-- `optim_conf.lr`（float）：学习率。
-- `output_dir`（str）：模型保存路径。
-- `**kwargs`(dict): 所有在`config.yaml`中参数，均可以直接在此处指定，例如，过滤20s以上长音频：`dataset_conf.max_token_length=2000`，单位为音频fbank帧数（1帧10ms）或者文字token个数。
-
-#### 多gpu训练
-##### 单机多gpu训练
-```shell
-export CUDA_VISIBLE_DEVICES="0,1"
-gpu_num=$(echo $CUDA_VISIBLE_DEVICES | awk -F "," '{print NF}')
-
-torchrun --nnodes 1 --nproc_per_node ${gpu_num} \
-../../../funasr/bin/train_ds.py ${train_args}
-```
---nnodes 表示参与的节点总数，--nproc_per_node 表示每个节点上运行的进程数
-
-##### 多机多gpu训练
-
-在主节点上，假设IP为192.168.1.1，端口为12345，使用的是2个GPU，则运行如下命令：
-```shell
-export CUDA_VISIBLE_DEVICES="0,1"
-gpu_num=$(echo $CUDA_VISIBLE_DEVICES | awk -F "," '{print NF}')
-
-torchrun --nnodes 2 --node_rank 0 --nproc_per_node ${gpu_num} --master_addr 192.168.1.1 --master_port 12345 \
-../../../funasr/bin/train_ds.py ${train_args}
-```
-在从节点上（假设IP为192.168.1.2），你需要确保MASTER_ADDR和MASTER_PORT环境变量与主节点设置的一致，并运行同样的命令：
-```shell
-export CUDA_VISIBLE_DEVICES="0,1"
-gpu_num=$(echo $CUDA_VISIBLE_DEVICES | awk -F "," '{print NF}')
-
-torchrun --nnodes 2 --node_rank 1 --nproc_per_node ${gpu_num} --master_addr 192.168.1.1 --master_port 12345 \
-../../../funasr/bin/train_ds.py ${train_args}
-```
-
---nnodes 表示参与的节点总数，--node_rank 表示当前节点id，--nproc_per_node 表示每个节点上运行的进程数（通常为gpu个数）
-
-#### 准备数据
-
-`jsonl`格式可以参考（[例子](https://github.com/alibaba-damo-academy/FunASR/blob/main/data/list)）。
-可以用指令 `scp2jsonl` 从wav.scp与text.txt生成。wav.scp与text.txt准备过程如下：
-
-`train_text.txt`
-
-左边为数据唯一ID，需与`train_wav.scp`中的`ID`一一对应
-右边为音频文件标注文本，格式如下：
+### 1. 安装FunASR
 
 ```bash
-ID0012W0013 当客户风险承受能力评估依据发生变化时
-ID0012W0014 所有只要处理 data 不管你是做 machine learning 做 deep learning
-ID0012W0015 he tried to think how it could be
+# 安装FunASR
+pip install funasr
+# 或从源码安装
+git clone https://github.com/alibaba-damo-academy/FunASR.git
+cd FunASR
+pip install -e .
 ```
 
-
-`train_wav.scp`
-
-左边为数据唯一ID，需与`train_text.txt`中的`ID`一一对应
-右边为音频文件的路径，格式如下
+### 2. 安装MCP服务器依赖
 
 ```bash
-BAC009S0764W0121 https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/BAC009S0764W0121.wav
-BAC009S0916W0489 https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/BAC009S0916W0489.wav
-ID0012W0015 https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/asr_example_cn_en.wav
+pip install websockets asyncio numpy
 ```
 
-`生成指令`
+## 使用方法
 
-```shell
-# generate train.jsonl and val.jsonl from wav.scp and text.txt
-scp2jsonl \
-++scp_file_list='["../../../data/list/train_wav.scp", "../../../data/list/train_text.txt"]' \
-++data_type_list='["source", "target"]' \
-++jsonl_file_out="../../../data/list/train.jsonl"
-```
+### 1. 启动MCP服务器
 
-（可选，非必需）如果需要从jsonl解析成wav.scp与text.txt，可以使用指令：
-
-```shell
-# generate wav.scp and text.txt from train.jsonl and val.jsonl
-jsonl2scp \
-++scp_file_list='["../../../data/list/train_wav.scp", "../../../data/list/train_text.txt"]' \
-++data_type_list='["source", "target"]' \
-++jsonl_file_in="../../../data/list/train.jsonl"
-```
-
-#### 大数据训练
-如果数据量很大，例如5万小时以上，这时候容易遇到内存不足的问题，特别是多gpu实验，这时候需要对jsonl文件进行切分成slice，然后写到txt里面，一行一个slice，然后设置`data_split_num`，例如：
-```shell
-train_data="/root/data/list/data.list"
-
-funasr/bin/train_ds.py \
-++train_data_set_list="${train_data}" \
-++dataset_conf.data_split_num=256
-```
-其中：
-`data.list`：为纯文本，内容是切割后的jsonl文件，例如，`data.list`的内容为：
 ```bash
-data/list/train.0.jsonl
-data/list/train.1.jsonl
-...
+# 基本启动
+python sensvoice_mcp_server.py
+
+# 指定端口
+python sensvoice_mcp_server.py --port 8081
+
+# 自动初始化常用模型
+python sensvoice_mcp_server.py --auto-init
 ```
-`data_split_num`：表示切分slice分组个数，例如，data.list中共512行，data_split_num=256，表示分成256组，每组有2个jsonl文件，这样每次只load 2个jsonl数据进行训练，从而降低训练过程中内存使用。注意是按照顺序分组。
-如果是，非常大，并且数据类型差异比较大，建议切分时候进行数据均衡。
 
-#### 查看训练日志
+### 2. 使用客户端
 
-##### 查看实验log
-```shell
-tail log.txt
-[2024-03-21 15:55:52,137][root][INFO] - train, rank: 3, epoch: 0/50, step: 6990/1, total step: 6990, (loss_avg_rank: 0.327), (loss_avg_epoch: 0.409), (ppl_avg_epoch: 1.506), (acc_avg_epoch: 0.795), (lr: 1.165e-04), [('loss_att', 0.259), ('acc', 0.825), ('loss_pre', 0.04), ('loss', 0.299), ('batch_size', 40)], {'data_load': '0.000', 'forward_time': '0.315', 'backward_time': '0.555', 'optim_time': '0.076', 'total_time': '0.947'}, GPU, memory: usage: 3.830 GB, peak: 18.357 GB, cache: 20.910 GB, cache_peak: 20.910 GB
-[2024-03-21 15:55:52,139][root][INFO] - train, rank: 1, epoch: 0/50, step: 6990/1, total step: 6990, (loss_avg_rank: 0.334), (loss_avg_epoch: 0.409), (ppl_avg_epoch: 1.506), (acc_avg_epoch: 0.795), (lr: 1.165e-04), [('loss_att', 0.285), ('acc', 0.823), ('loss_pre', 0.046), ('loss', 0.331), ('batch_size', 36)], {'data_load': '0.000', 'forward_time': '0.334', 'backward_time': '0.536', 'optim_time': '0.077', 'total_time': '0.948'}, GPU, memory: usage: 3.943 GB, peak: 18.291 GB, cache: 19.619 GB, cache_peak: 19.619 GB
-```
-指标解释：
-- `rank`：表示gpu id。
-- `epoch`,`step`,`total step`：表示当前epoch，step，总step。
-- `loss_avg_rank`：表示当前step，所有gpu平均loss。
-- `loss/ppl/acc_avg_epoch`：表示当前epoch周期，截止当前step数时，总平均loss/ppl/acc。epoch结束时的最后一个step表示epoch总平均loss/ppl/acc，推荐使用acc指标。
-- `lr`：当前step的学习率。
-- `[('loss_att', 0.259), ('acc', 0.825), ('loss_pre', 0.04), ('loss', 0.299), ('batch_size', 40)]`：表示当前gpu id的具体数据。
-- `total_time`：表示单个step总耗时。
-- `GPU, memory`：分别表示，模型使用/峰值显存，模型+缓存使用/峰值显存。
-
-##### tensorboard可视化
 ```bash
-tensorboard --logdir /xxxx/FunASR/examples/industrial_data_pretraining/paraformer/outputs/log/tensorboard
+# 运行演示
+python sensvoice_mcp_client.py --demo
+
+# 交互模式
+python sensvoice_mcp_client.py --interactive
 ```
-浏览器中打开：http://localhost:6006/
 
-### 训练后模型测试
+## MCP工具说明
 
+### initialize_model
+初始化SensVoice/FunASR模型
+- `model_name`: 模型名称 (如: paraformer-zh, fsmn-vad, ct-punc)
+- `device`: 设备类型 (cpu, cuda:0, mps, xpu)
+- `vad_model`: VAD模型名称 (可选)
+- `punc_model`: 标点模型名称 (可选)
+- `spk_model`: 说话人识别模型名称 (可选)
 
-#### 有configuration.json
+### audio_recognize
+语音识别（非实时）
+- `model_key`: 模型键值
+- `audio_input`: 音频输入（base64编码或文件路径）
+- `input_type`: 输入类型 (base64, file_path, bytes, wav_scp)
+- `hotword`: 热词（可选）
 
-假定，训练模型路径为：./model_dir，如果该目录下有生成configuration.json，只需要将 [上述模型推理方法](https://github.com/alibaba-damo-academy/FunASR/blob/main/examples/README_zh.md#%E6%A8%A1%E5%9E%8B%E6%8E%A8%E7%90%86) 中模型名字修改为模型路径即可
+### streaming_asr
+实时语音识别
+- `model_key`: 模型键值
+- `audio_chunk_base64`: 音频片段的base64编码
+- `cache`: 缓存对象
+- `is_final`: 是否为最后一个片段
+- `chunk_size`: 流式延时配置
 
-例如：
+### vad_detect
+语音端点检测（非实时）
+- `model_key`: VAD模型键值
+- `audio_input`: 音频输入（base64编码或文件路径）
 
-从shell推理
-```shell
-python -m funasr.bin.inference ++model="./model_dir" ++input=="${input}" ++output_dir="${output_dir}"
-```
-从python推理
+### streaming_vad
+实时语音端点检测
+- `model_key`: VAD模型键值
+- `audio_chunk_base64`: 音频片段的base64编码
+- `chunk_size`: chunk大小（毫秒）
+
+### punctuation_restore
+标点恢复
+- `model_key`: 标点模型键值
+- `text`: 需要恢复标点的文本
+
+### timestamp_prediction
+时间戳预测
+- `model_key`: 时间戳模型键值
+- `audio_file_base64`: 音频文件的base64编码
+- `text_content`: 对应的文本内容
+
+## 支持的模型
+
+### ASR模型
+- `paraformer-zh`: 中文语音识别
+- `paraformer-en`: 英文语音识别
+- `paraformer-zh-streaming`: 中文实时语音识别
+
+### VAD模型
+- `fsmn-vad`: 语音端点检测
+
+### 标点模型
+- `ct-punc`: 中文标点恢复
+
+### 时间戳模型
+- `fa-zh`: 中文时间戳预测
+
+## API使用示例
+
+### Python客户端示例
 
 ```python
-from funasr import AutoModel
+import asyncio
+import json
+import websockets
 
-model = AutoModel(model="./model_dir")
+async def example_usage():
+    # 连接到服务器
+    websocket = await websockets.connect("ws://localhost:8081")
+    
+    # 初始化ASR模型（带VAD和标点）
+    request = {
+        "action": "call_function",
+        "name": "initialize_model",
+        "arguments": {
+            "model_name": "paraformer-zh",
+            "device": "cpu",
+            "vad_model": "fsmn-vad",
+            "punc_model": "ct-punc"
+        }
+    }
+    await websocket.send(json.dumps(request))
+    response = await websocket.recv()
+    result = json.loads(response)
+    model_key = result["result"]["model_key"]
+    
+    # 加载音频文件
+    request = {
+        "action": "call_function",
+        "name": "load_audio",
+        "arguments": {"filepath": "test_audio.wav"}
+    }
+    await websocket.send(json.dumps(request))
+    response = await websocket.recv()
+    audio_data = json.loads(response)
+    
+    if audio_data["result"]["success"]:
+        # 语音识别
+        request = {
+            "action": "call_function",
+            "name": "audio_recognize",
+            "arguments": {
+                "model_key": model_key,
+                "audio_input": audio_data["result"]["audio_base64"],
+                "input_type": "base64",
+                "hotword": "SensVoice"
+            }
+        }
+        await websocket.send(json.dumps(request))
+        response = await websocket.recv()
+        asr_result = json.loads(response)
+        print("识别结果:", asr_result)
+    
+    await websocket.close()
 
-res = model.generate(input=wav_file)
-print(res)
+# 运行示例
+asyncio.run(example_usage())
 ```
 
-#### 无configuration.json时
-
-如果模型路径中无configuration.json时，需要手动指定具体配置文件路径与模型路径
-
-```shell
-python -m funasr.bin.inference \
---config-path "${local_path}" \
---config-name "${config}" \
-++init_param="${init_param}" \
-++tokenizer_conf.token_list="${tokens}" \
-++frontend_conf.cmvn_file="${cmvn_file}" \
-++input="${input}" \
-++output_dir="${output_dir}" \
-++device="${device}"
-```
-
-参数介绍
-- `config-path`：为实验中保存的 `config.yaml`，可以从实验输出目录中查找。
-- `config-name`：配置文件名，一般为 `config.yaml`，支持yaml格式与json格式，例如 `config.json`
-- `init_param`：需要测试的模型参数，一般为`model.pt`，可以自己选择具体的模型文件
-- `tokenizer_conf.token_list`：词表文件路径，一般在 `config.yaml` 有指定，无需再手动指定，当 `config.yaml` 中路径不正确时，需要在此处手动指定。
-- `frontend_conf.cmvn_file`：wav提取fbank中用到的cmvn文件，一般在 `config.yaml` 有指定，无需再手动指定，当 `config.yaml` 中路径不正确时，需要在此处手动指定。
-
-其他参数同上，完整 [示例](https://github.com/alibaba-damo-academy/FunASR/blob/main/examples/industrial_data_pretraining/paraformer/infer_from_local.sh)
-
-
-<a name="模型导出与测试"></a>
-## 模型导出与测试
-### 从命令行导出
-```shell
-funasr-export ++model=paraformer ++quantize=false
-```
-
-### 从Python导出
-```python
-from funasr import AutoModel
-
-model = AutoModel(model="paraformer")
-
-res = model.export(quantize=False)
-```
-
-### 优化onnx
-```shell
-# pip3 install -U onnxslim
-onnxslim model.onnx model.onnx
-```
-
-### 测试ONNX
-```python
-# pip3 install -U funasr-onnx
-from funasr_onnx import Paraformer
-model_dir = "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
-model = Paraformer(model_dir, batch_size=1, quantize=True)
-
-wav_path = ['~/.cache/modelscope/hub/damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/example/asr_example.wav']
-
-result = model(wav_path)
-print(result)
-```
-
-更多例子请参考 [样例](https://github.com/alibaba-damo-academy/FunASR/tree/main/runtime/python/onnxruntime)
-
-<a name="新模型注册教程"></a>
-## 新模型注册教程
-
-
-### 查看注册表
-
-```plaintext
-from funasr.register import tables
-
-tables.print()
-```
-
-支持查看指定类型的注册表：\`tables.print("model")\`
-
-### 注册模型
+### 标点恢复示例
 
 ```python
-from funasr.register import tables
-
-@tables.register("model_classes", "SenseVoiceSmall")
-class SenseVoiceSmall(nn.Module):
-  def __init__(*args, **kwargs):
-    ...
-
-  def forward(
-      self,
-      **kwargs,
-  ):  
-
-  def inference(
-      self,
-      data_in,
-      data_lengths=None,
-      key: list = None,
-      tokenizer=None,
-      frontend=None,
-      **kwargs,
-  ):
-    ...
-
+async def punctuation_example():
+    websocket = await websockets.connect("ws://localhost:8081")
+    
+    # 初始化标点模型
+    request = {
+        "action": "call_function",
+        "name": "initialize_model",
+        "arguments": {"model_name": "ct-punc", "device": "cpu"}
+    }
+    await websocket.send(json.dumps(request))
+    response = await websocket.recv()
+    result = json.loads(response)
+    model_key = result["result"]["model_key"]
+    
+    # 标点恢复
+    request = {
+        "action": "call_function",
+        "name": "punctuation_restore",
+        "arguments": {
+            "model_key": model_key,
+            "text": "那今天的会就到这里吧 happy new year 明年见"
+        }
+    }
+    await websocket.send(json.dumps(request))
+    response = await websocket.recv()
+    punc_result = json.loads(response)
+    print("标点恢复结果:", punc_result)
+    
+    await websocket.close()
 ```
 
-在需要注册的类名前加上 `@tables.register("model_classes","SenseVoiceSmall")`，即可完成注册，类需要实现有：__init__，forward，inference方法。
-
-完整代码：[https://github.com/modelscope/FunASR/blob/main/funasr/models/sense\_voice/model.py#L443](https://github.com/modelscope/FunASR/blob/main/funasr/models/sense_voice/model.py#L443)
-
-注册完成后，在config.yaml中指定新注册模型，即可实现对模型的定义
+### 实时语音识别示例
 
 ```python
-model: SenseVoiceSmall
-model_conf:
-  ...
+async def streaming_asr_example():
+    websocket = await websockets.connect("ws://localhost:8081")
+    
+    # 初始化流式ASR模型
+    request = {
+        "action": "call_function",
+        "name": "initialize_model",
+        "arguments": {
+            "model_name": "paraformer-zh-streaming",
+            "device": "cpu"
+        }
+    }
+    await websocket.send(json.dumps(request))
+    response = await websocket.recv()
+    result = json.loads(response)
+    model_key = result["result"]["model_key"]
+    
+    # 模拟流式音频数据（实际应用中从麦克风获取）
+    cache = {}
+    for i in range(10):  # 模拟10个音频块
+        # 这里应该是实际的音频数据
+        audio_chunk_base64 = "..."  # 实际的base64编码音频数据
+        is_final = (i == 9)  # 最后一个块
+        
+        request = {
+            "action": "call_function",
+            "name": "streaming_asr",
+            "arguments": {
+                "model_key": model_key,
+                "audio_chunk_base64": audio_chunk_base64,
+                "cache": cache,
+                "is_final": is_final
+            }
+        }
+        await websocket.send(json.dumps(request))
+        response = await websocket.recv()
+        result = json.loads(response)
+        
+        # 更新缓存
+        cache = result["result"]["cache"]
+        print(f"块 {i} 识别结果:", result)
+    
+    await websocket.close()
 ```
 
+## 注意事项
 
-[关于注册更多详细教程文档](https://github.com/modelscope/FunASR/blob/main/docs/tutorial/Tables_zh.md)
+1. **音频格式**: 输入音频建议使用16kHz的WAV格式
+2. **模型下载**: 首次使用时会自动下载模型，请确保网络连接正常
+3. **设备选择**: GPU推理速度更快，但需要CUDA环境
+4. **内存使用**: 长音频处理可能需要较大内存
+
+## 故障排除
+
+### 模型下载失败
+- 检查网络连接
+- 尝试更换hub参数（ms或hf）
+- 手动下载模型到本地
+
+### 音频识别错误
+- 确保音频文件存在且格式正确
+- 检查base64编码是否有效
+- 验证模型是否正确初始化
+
+### 实时处理问题
+- 检查音频块大小是否合适
+- 确认缓存对象传递正确
+- 验证is_final参数设置
+
+## 扩展开发
+
+服务器采用模块化设计，可以轻松添加新功能：
+
+1. 在`TOOLS`字典中添加新工具定义
+2. 实现对应的处理函数
+3. 更新客户端以支持新功能
+
+## 许可证
+
+请遵循FunASR项目的许可证要求。
