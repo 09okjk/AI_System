@@ -110,6 +110,7 @@ class LLMConfigBase(BaseModel):
     enabled: bool = Field(True, description="是否启用")
 
     @field_validator('api_key')
+    @classmethod
     def validate_api_key(cls, v):
         """验证 API 密钥格式"""
         if v and len(v) < 10:
@@ -117,6 +118,7 @@ class LLMConfigBase(BaseModel):
         return v
 
     @field_validator('temperature')
+    @classmethod
     def validate_temperature(cls, v):
         """验证温度参数"""
         if v < 0 or v > 2:
@@ -124,6 +126,7 @@ class LLMConfigBase(BaseModel):
         return v
 
     @field_validator('top_p')
+    @classmethod
     def validate_top_p(cls, v):
         """验证 top_p 参数"""
         if v < 0 or v > 1:
@@ -223,28 +226,28 @@ class VoiceChatResponse(BaseResponse):
 
 # ==================== 验证器 ====================
 
-@field_validator('api_key')
-def validate_api_key(cls, v):
-    """验证 API 密钥格式"""
-    if v and len(v) < 10:
-        raise ValueError('API 密钥长度不能少于10个字符')
-    return v
+# @field_validator('api_key')
+# def validate_api_key(cls, v):
+#     """验证 API 密钥格式"""
+#     if v and len(v) < 10:
+#         raise ValueError('API 密钥长度不能少于10个字符')
+#     return v
 
-@field_validator('temperature')
-def validate_temperature(cls, v):
-    """验证温度参数"""
-    if v < 0 or v > 2:
-        raise ValueError('温度参数必须在0-2之间')
-    return v
+# @field_validator('temperature')
+# def validate_temperature(cls, v):
+#     """验证温度参数"""
+#     if v < 0 or v > 2:
+#         raise ValueError('温度参数必须在0-2之间')
+#     return v
 
-@field_validator('top_p')
-def validate_top_p(cls, v):
-    """验证 top_p 参数"""
-    if v < 0 or v > 1:
-        raise ValueError('top_p 参数必须在0-1之间')
-    return v
+# @field_validator('top_p')
+# def validate_top_p(cls, v):
+#     """验证 top_p 参数"""
+#     if v < 0 or v > 1:
+#         raise ValueError('top_p 参数必须在0-1之间')
+#     return v
 
-# 将验证器添加到相应的模型中
-LLMConfigBase.__validators__['validate_api_key'] = validator('api_key', allow_reuse=True)(validate_api_key)
-LLMConfigBase.__validators__['validate_temperature'] = validator('temperature', allow_reuse=True)(validate_temperature)
-LLMConfigBase.__validators__['validate_top_p'] = validator('top_p', allow_reuse=True)(validate_top_p)
+# # 将验证器添加到相应的模型中
+# LLMConfigBase.__validators__['validate_api_key'] = validator('api_key', allow_reuse=True)(validate_api_key)
+# LLMConfigBase.__validators__['validate_temperature'] = validator('temperature', allow_reuse=True)(validate_temperature)
+# LLMConfigBase.__validators__['validate_top_p'] = validator('top_p', allow_reuse=True)(validate_top_p)
