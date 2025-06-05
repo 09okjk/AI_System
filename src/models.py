@@ -2,7 +2,7 @@
 API 请求和响应模型定义 - 完整版
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional, Union
 from datetime import datetime
 from enum import Enum
@@ -109,21 +109,21 @@ class LLMConfigBase(BaseModel):
     is_default: bool = Field(False, description="是否为默认模型")
     enabled: bool = Field(True, description="是否启用")
 
-    @validator('api_key')
+    @field_validator('api_key')
     def validate_api_key(cls, v):
         """验证 API 密钥格式"""
         if v and len(v) < 10:
             raise ValueError('API 密钥长度不能少于10个字符')
         return v
 
-    @validator('temperature')
+    @field_validator('temperature')
     def validate_temperature(cls, v):
         """验证温度参数"""
         if v < 0 or v > 2:
             raise ValueError('温度参数必须在0-2之间')
         return v
 
-    @validator('top_p')
+    @field_validator('top_p')
     def validate_top_p(cls, v):
         """验证 top_p 参数"""
         if v < 0 or v > 1:
@@ -223,21 +223,21 @@ class VoiceChatResponse(BaseResponse):
 
 # ==================== 验证器 ====================
 
-@validator('api_key')
+@field_validator('api_key')
 def validate_api_key(cls, v):
     """验证 API 密钥格式"""
     if v and len(v) < 10:
         raise ValueError('API 密钥长度不能少于10个字符')
     return v
 
-@validator('temperature')
+@field_validator('temperature')
 def validate_temperature(cls, v):
     """验证温度参数"""
     if v < 0 or v > 2:
         raise ValueError('温度参数必须在0-2之间')
     return v
 
-@validator('top_p')
+@field_validator('top_p')
 def validate_top_p(cls, v):
     """验证 top_p 参数"""
     if v < 0 or v > 1:
