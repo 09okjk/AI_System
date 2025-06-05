@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 AI Agent 后端服务主入口
 提供 API 接口用于 MCP 配置、模型配置和语音处理
@@ -7,7 +8,6 @@ AI Agent 后端服务主入口
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-import uvicorn
 import logging
 import asyncio
 from datetime import datetime
@@ -30,7 +30,13 @@ def get_managers():
     from src.llm import LLMManager
     from src.speech import SpeechProcessor
     from src.logger import setup_logger, get_logger
-    from src.models import LLMConfigCreate, LLMConfigUpdate, LLMConfigResponse, MCPConfigCreate, MCPConfigUpdate, MCPConfigResponse
+    from src.models import (
+        LLMConfigCreate, LLMConfigUpdate, LLMConfigResponse, 
+        MCPConfigCreate, MCPConfigUpdate, MCPConfigResponse,
+        HealthResponse, SystemStatusResponse, SpeechRecognitionResponse,
+        SpeechSynthesisResponse, SpeechSynthesisRequest, VoiceChatResponse,
+        ChatRequest, ChatResponse
+    )
     from src.utils import validate_config, generate_response_id
     
     return {
@@ -41,7 +47,22 @@ def get_managers():
         'setup_logger': setup_logger,
         'get_logger': get_logger,
         'validate_config': validate_config,
-        'generate_response_id': generate_response_id
+        'generate_response_id': generate_response_id,
+        # 导出所有响应模型
+        'HealthResponse': HealthResponse,
+        'SystemStatusResponse': SystemStatusResponse,
+        'SpeechRecognitionResponse': SpeechRecognitionResponse,
+        'SpeechSynthesisResponse': SpeechSynthesisResponse,
+        'SpeechSynthesisRequest': SpeechSynthesisRequest,
+        'VoiceChatResponse': VoiceChatResponse,
+        'ChatRequest': ChatRequest,
+        'ChatResponse': ChatResponse,
+        'MCPConfigCreate': MCPConfigCreate,
+        'MCPConfigUpdate': MCPConfigUpdate,
+        'MCPConfigResponse': MCPConfigResponse,
+        'LLMConfigCreate': LLMConfigCreate,
+        'LLMConfigUpdate': LLMConfigUpdate,
+        'LLMConfigResponse': LLMConfigResponse
     }
 
 # 创建 FastAPI 应用
@@ -53,6 +74,15 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# 配置 CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # 全局变量（在startup时初始化）
 managers = None
 config_manager = None
@@ -60,6 +90,13 @@ mcp_manager = None
 llm_manager = None
 speech_processor = None
 logger = None
+
+# 获取响应模型类
+def get_response_models():
+    """获取响应模型类"""
+    if managers is None:
+        return get_managers()
+    return managers
 
 @app.on_event("startup")
 async def startup_event():
@@ -101,37 +138,39 @@ async def startup_event():
         logger.error(f"❌ 启动失败: {str(e)}")
         raise
 
-# 配置 CORS - 移到函数外
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 @app.on_event("shutdown")
 async def shutdown_event():
     """应用关闭时的清理"""
-    logger.info("🔄 AI Agent Backend 正在关闭...")
+    if logger:
+        logger.info("🔄 AI Agent Backend 正在关闭...")
     
     try:
-        await speech_processor.cleanup()
-        await llm_manager.cleanup()
-        await mcp_manager.cleanup()
-        await config_manager.cleanup()
+        if speech_processor:
+            await speech_processor.cleanup()
+        if llm_manager:
+            await llm_manager.cleanup()
+        if mcp_manager:
+            await mcp_manager.cleanup()
+        if config_manager:
+            await config_manager.cleanup()
         
-        logger.info("✅ AI Agent Backend 已安全关闭")
+        if logger:
+            logger.info("✅ AI Agent Backend 已安全关闭")
         
     except Exception as e:
-        logger.error(f"❌ 关闭时出错: {str(e)}")
+        if logger:
+            logger.error(f"❌ 关闭时出错: {str(e)}")
 
 # ==================== 系统状态接口 ====================
 
-@app.get("/api/health", response_model=HealthResponse)
+@app.get("/api/health")
 async def health_check():
     """健康检查接口"""
-    logger.info("🔍 执行健康检查")
+    models = get_response_models()
+    HealthResponse = models['HealthResponse']
+    
+    if logger:
+        logger.info("🔍 执行健康检查")
     
     try:
         status = {
@@ -139,10 +178,10 @@ async def health_check():
             "timestamp": datetime.utcnow(),
             "version": "2.0.0",
             "components": {
-                "config_manager": await config_manager.health_check(),
-                "mcp_manager": await mcp_manager.health_check(),
-                "llm_manager": await llm_manager.health_check(),
-                "speech_processor": await speech_processor.health_check()
+                "config_manager": await config_manager.health_check() if config_manager else {"healthy": False},
+                "mcp_manager": await mcp_manager.health_check() if mcp_manager else {"healthy": False},
+                "llm_manager": await llm_manager.health_check() if llm_manager else {"healthy": False},
+                "speech_processor": await speech_processor.health_check() if speech_processor else {"healthy": False}
             }
         }
         
@@ -154,13 +193,17 @@ async def health_check():
         
         if unhealthy_components:
             status["status"] = "degraded"
-            logger.warning(f"⚠️ 部分组件不健康: {unhealthy_components}")
+            if logger:
+                logger.warning(f"⚠️ 部分组件不健康: {unhealthy_components}")
         
-        logger.info("✅ 健康检查完成")
+        if logger:
+            logger.info("✅ 健康检查完成")
+        
         return HealthResponse(**status)
         
     except Exception as e:
-        logger.error(f"❌ 健康检查失败: {str(e)}")
+        if logger:
+            logger.error(f"❌ 健康检查失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/status", response_model=SystemStatusResponse)

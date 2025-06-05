@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Agent Backend 启动脚本 - 改进版
+AI Agent Backend 启动脚本 - 最终版
 """
 
 import os
@@ -24,7 +24,8 @@ def check_dependencies():
         ('aiofiles', 'Async file operations'),
         ('aiohttp', 'Async HTTP client'),
         ('pydantic', 'Data validation'),
-        ('psutil', 'System monitoring')
+        ('psutil', 'System monitoring'),
+        ('python_dotenv', 'Environment variables')
     ]
     
     optional_packages = [
@@ -40,10 +41,14 @@ def check_dependencies():
     
     # 检查必需依赖
     for package, description in required_packages:
+        package_name = package.replace('_', '-')  # 处理包名差异
         try:
-            __import__(package)
+            if package == 'python_dotenv':
+                import dotenv
+            else:
+                __import__(package)
         except ImportError:
-            missing_required.append(f"  - {package}: {description}")
+            missing_required.append(f"  - {package_name}: {description}")
     
     # 检查可选依赖
     for package, description in optional_packages:
@@ -68,13 +73,48 @@ def check_dependencies():
     
     return True
 
+def validate_main_app():
+    """验证 main.py 是否可以正常导入"""
+    try:
+        from main import app
+        print("✅ main.py 导入成功")
+        return True
+    except Exception as e:
+        print(f"❌ main.py 导入失败: {e}")
+        return False
+
 def setup_environment():
     """设置环境"""
     # 创建必要的目录
-    directories = ["logs", "config", "tools", "tests", "assets"]
+    directories = ["logs", "config", "tools", "tests", "assets", "src"]
     for directory in directories:
         Path(directory).mkdir(exist_ok=True)
         print(f"📁 目录已准备: {directory}")
+    
+    # 检查关键文件
+    key_files = [
+        "main.py",
+        "src/__init__.py",
+        "src/models.py",
+        "src/logger.py",
+        "src/config.py",
+        "src/utils.py",
+        "src/mcp.py",
+        "src/llm.py",
+        "src/speech.py"
+    ]
+    
+    missing_files = []
+    for file_path in key_files:
+        if not Path(file_path).exists():
+            missing_files.append(file_path)
+    
+    if missing_files:
+        print("\n⚠️  缺少关键文件:")
+        for file_path in missing_files:
+            print(f"  - {file_path}")
+        print("\n请确保所有源代码文件都已创建")
+        return False
     
     # 检查配置文件
     config_files = [
@@ -85,7 +125,7 @@ def setup_environment():
     
     for config_file in config_files:
         if not Path(config_file).exists():
-            print(f"⚠️  配置文件不存在: {config_file}")
+            print(f"ℹ️  配置文件不存在: {config_file}")
             print("  将在首次运行时自动创建默认配置")
     
     # 检查环境变量
@@ -105,6 +145,8 @@ def setup_environment():
             print(f"  ✅ {key}: {masked_value}")
         else:
             print(f"  ❌ {key}: 未设置")
+    
+    return True
 
 def create_sample_env():
     """创建示例环境文件"""
@@ -145,6 +187,7 @@ def main():
     parser.add_argument("--reload", action="store_true", help="开发模式（热重载）")
     parser.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "info"), help="日志级别")
     parser.add_argument("--check-only", action="store_true", help="仅检查环境，不启动服务")
+    parser.add_argument("--workers", type=int, default=1, help="工作进程数（生产环境建议使用）")
     
     args = parser.parse_args()
     
@@ -156,7 +199,12 @@ def main():
         sys.exit(1)
     
     # 设置环境
-    setup_environment()
+    if not setup_environment():
+        sys.exit(1)
+    
+    # 验证主应用
+    if not validate_main_app():
+        sys.exit(1)
     
     # 创建示例环境文件
     create_sample_env()
@@ -174,6 +222,7 @@ def main():
         print(f"  - 端口: {args.port}")
         print(f"  - 开发模式: {args.reload}")
         print(f"  - 日志级别: {args.log_level}")
+        print(f"  - 工作进程: {args.workers}")
         print(f"  - API文档: http://{args.host}:{args.port}/docs")
         print(f"  - 健康检查: http://{args.host}:{args.port}/api/health")
         print("\n" + "=" * 50)
@@ -183,7 +232,8 @@ def main():
             host=args.host,
             port=args.port,
             reload=args.reload,
-            log_level=args.log_level
+            log_level=args.log_level,
+            workers=args.workers if not args.reload else 1  # 开发模式下只能用单进程
         )
         
     except KeyboardInterrupt:
