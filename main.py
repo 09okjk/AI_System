@@ -25,45 +25,49 @@ if str(project_root) not in sys.path:
 # 延迟导入，避免循环依赖
 def get_managers():
     """延迟导入管理器类"""
-    from src.config import ConfigManager
-    from src.mcp import MCPManager
-    from src.llm import LLMManager
-    from src.speech import SpeechProcessor
-    from src.logger import setup_logger, get_logger
-    from src.models import (
-        LLMConfigCreate, LLMConfigUpdate, LLMConfigResponse, 
-        MCPConfigCreate, MCPConfigUpdate, MCPConfigResponse,
-        HealthResponse, SystemStatusResponse, SpeechRecognitionResponse,
-        SpeechSynthesisResponse, SpeechSynthesisRequest, VoiceChatResponse,
-        ChatRequest, ChatResponse
-    )
-    from src.utils import validate_config, generate_response_id
-    
-    return {
-        'ConfigManager': ConfigManager,
-        'MCPManager': MCPManager,
-        'LLMManager': LLMManager,
-        'SpeechProcessor': SpeechProcessor,
-        'setup_logger': setup_logger,
-        'get_logger': get_logger,
-        'validate_config': validate_config,
-        'generate_response_id': generate_response_id,
-        # 导出所有响应模型
-        'HealthResponse': HealthResponse,
-        'SystemStatusResponse': SystemStatusResponse,
-        'SpeechRecognitionResponse': SpeechRecognitionResponse,
-        'SpeechSynthesisResponse': SpeechSynthesisResponse,
-        'SpeechSynthesisRequest': SpeechSynthesisRequest,
-        'VoiceChatResponse': VoiceChatResponse,
-        'ChatRequest': ChatRequest,
-        'ChatResponse': ChatResponse,
-        'MCPConfigCreate': MCPConfigCreate,
-        'MCPConfigUpdate': MCPConfigUpdate,
-        'MCPConfigResponse': MCPConfigResponse,
-        'LLMConfigCreate': LLMConfigCreate,
-        'LLMConfigUpdate': LLMConfigUpdate,
-        'LLMConfigResponse': LLMConfigResponse
-    }
+    try:
+        from src.config import ConfigManager
+        from src.mcp import MCPManager
+        from src.llm import LLMManager
+        from src.speech import SpeechProcessor
+        from src.logger import setup_logger, get_logger
+        from src.models import (
+            LLMConfigCreate, LLMConfigUpdate, LLMConfigResponse, 
+            MCPConfigCreate, MCPConfigUpdate, MCPConfigResponse,
+            HealthResponse, SystemStatusResponse, SpeechRecognitionResponse,
+            SpeechSynthesisResponse, SpeechSynthesisRequest, VoiceChatResponse,
+            ChatRequest, ChatResponse
+        )
+        from src.utils import validate_config, generate_response_id
+        
+        return {
+            'ConfigManager': ConfigManager,
+            'MCPManager': MCPManager,
+            'LLMManager': LLMManager,
+            'SpeechProcessor': SpeechProcessor,
+            'setup_logger': setup_logger,
+            'get_logger': get_logger,
+            'validate_config': validate_config,
+            'generate_response_id': generate_response_id,
+            # 导出所有响应模型
+            'HealthResponse': HealthResponse,
+            'SystemStatusResponse': SystemStatusResponse,
+            'SpeechRecognitionResponse': SpeechRecognitionResponse,
+            'SpeechSynthesisResponse': SpeechSynthesisResponse,
+            'SpeechSynthesisRequest': SpeechSynthesisRequest,
+            'VoiceChatResponse': VoiceChatResponse,
+            'ChatRequest': ChatRequest,
+            'ChatResponse': ChatResponse,
+            'MCPConfigCreate': MCPConfigCreate,
+            'MCPConfigUpdate': MCPConfigUpdate,
+            'MCPConfigResponse': MCPConfigResponse,
+            'LLMConfigCreate': LLMConfigCreate,
+            'LLMConfigUpdate': LLMConfigUpdate,
+            'LLMConfigResponse': LLMConfigResponse
+        }
+    except ImportError as e:
+        # 如果导入失败，返回一个包含错误信息的字典
+        return {'error': f"导入失败: {str(e)}"}
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -91,11 +95,11 @@ llm_manager = None
 speech_processor = None
 logger = None
 
-# 获取响应模型类
 def get_response_models():
     """获取响应模型类"""
-    if managers is None:
-        return get_managers()
+    global managers
+    if managers is None or 'error' in managers:
+        managers = get_managers()
     return managers
 
 @app.on_event("startup")
@@ -105,6 +109,11 @@ async def startup_event():
     
     # 获取管理器类
     managers = get_managers()
+
+    # 检查导入是否成功
+    if 'error' in managers:
+        print(f"❌ 导入模块失败: {managers['error']}")
+        raise RuntimeError(f"模块导入失败: {managers['error']}")
     
     # 设置日志
     managers['setup_logger']()
@@ -167,6 +176,9 @@ async def shutdown_event():
 async def health_check():
     """健康检查接口"""
     models = get_response_models()
+
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
     HealthResponse = models['HealthResponse']
     
     if logger:
@@ -209,22 +221,35 @@ async def health_check():
 @app.get("/api/status", response_model=SystemStatusResponse)
 async def get_system_status():
     """获取系统详细状态"""
-    logger.info("📊 获取系统状态")
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    SystemStatusResponse = models['SystemStatusResponse']
+    
+    if logger:
+        logger.info("📊 获取系统状态")
     
     try:
         status = {
+            "success": True,
+            "timestamp": datetime.utcnow(),
             "uptime": datetime.utcnow(),  # 实际应用中应该记录启动时间
-            "mcp_tools": await mcp_manager.get_tools_status(),
-            "llm_models": await llm_manager.get_models_status(),
+            "mcp_tools": await mcp_manager.get_tools_status() if mcp_manager else {},
+            "llm_models": await llm_manager.get_models_status() if llm_manager else {},
             "active_sessions": await get_active_sessions_count(),
             "system_metrics": await get_system_metrics()
         }
         
-        logger.info("✅ 系统状态获取完成")
+        if logger:
+            logger.info("✅ 系统状态获取完成")
+        
         return SystemStatusResponse(**status)
         
     except Exception as e:
-        logger.error(f"❌ 获取系统状态失败: {str(e)}")
+        if logger:
+            logger.error(f"❌ 获取系统状态失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== MCP 配置接口 ====================
@@ -232,11 +257,20 @@ async def get_system_status():
 @app.get("/api/mcp/configs", response_model=List[MCPConfigResponse])
 async def get_mcp_configs():
     """获取所有 MCP 工具配置"""
-    logger.info("📋 获取 MCP 配置列表")
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    MCPConfigResponse = models['MCPConfigResponse']
+    
+    if logger:
+        logger.info("📋 获取 MCP 配置列表")
     
     try:
         configs = await mcp_manager.get_all_configs()
-        logger.info(f"✅ 获取到 {len(configs)} 个 MCP 配置")
+        if logger:
+            logger.info(f"✅ 获取到 {len(configs)} 个 MCP 配置")
         return configs
         
     except Exception as e:
@@ -246,7 +280,15 @@ async def get_mcp_configs():
 @app.post("/api/mcp/configs", response_model=MCPConfigResponse)
 async def create_mcp_config(config: MCPConfigCreate):
     """创建新的 MCP 工具配置"""
-    logger.info(f"➕ 创建 MCP 配置: {config.name}")
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    MCPConfigResponse = models['MCPConfigResponse']
+    
+    if logger:
+        logger.info(f"➕ 创建 MCP 配置: {config.name}")
     
     try:
         # 验证配置
@@ -271,7 +313,15 @@ async def create_mcp_config(config: MCPConfigCreate):
 @app.put("/api/mcp/configs/{config_id}", response_model=MCPConfigResponse)
 async def update_mcp_config(config_id: str, config: MCPConfigUpdate):
     """更新 MCP 工具配置"""
-    logger.info(f"✏️ 更新 MCP 配置: {config_id}")
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    MCPConfigResponse = models['MCPConfigResponse']
+    
+    if logger:
+        logger.info(f"✏️ 更新 MCP 配置: {config_id}")
     
     try:
         # 验证配置存在
@@ -297,7 +347,15 @@ async def update_mcp_config(config_id: str, config: MCPConfigUpdate):
 @app.delete("/api/mcp/configs/{config_id}")
 async def delete_mcp_config(config_id: str):
     """删除 MCP 工具配置"""
-    logger.info(f"🗑️ 删除 MCP 配置: {config_id}")
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    MCPConfigResponse = models['MCPConfigResponse']
+    
+    if logger:
+        logger.info(f"🗑️ 删除 MCP 配置: {config_id}")
     
     try:
         # 停止相关的 MCP 客户端
@@ -317,9 +375,17 @@ async def delete_mcp_config(config_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/mcp/configs/{config_id}/test")
-async def test_mcp_config(config_id: str):
+async def test_mcp_config(config_id: str):  
     """测试 MCP 工具配置"""
-    logger.info(f"🧪 测试 MCP 配置: {config_id}")
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    MCPConfigResponse = models['MCPConfigResponse']
+    
+    if logger:
+        logger.info(f"🧪 测试 MCP 配置: {config_id}")
     
     try:
         result = await mcp_manager.test_config(config_id)
@@ -340,11 +406,20 @@ async def test_mcp_config(config_id: str):
 @app.get("/api/llm/configs", response_model=List[LLMConfigResponse])
 async def get_llm_configs():
     """获取所有 LLM 模型配置"""
-    logger.info("📋 获取 LLM 配置列表")
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    LLMConfigResponse = models['LLMConfigResponse']
+    
+    if logger:
+        logger.info("📋 获取 LLM 配置列表")
     
     try:
         configs = await llm_manager.get_all_configs()
-        logger.info(f"✅ 获取到 {len(configs)} 个 LLM 配置")
+        if logger:
+            logger.info(f"✅ 获取到 {len(configs)} 个 LLM 配置")
         return configs
         
     except Exception as e:
@@ -354,7 +429,15 @@ async def get_llm_configs():
 @app.post("/api/llm/configs", response_model=LLMConfigResponse)
 async def create_llm_config(config: LLMConfigCreate):
     """创建新的 LLM 模型配置"""
-    logger.info(f"➕ 创建 LLM 配置: {config.name}")
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    LLMConfigResponse = models['LLMConfigResponse']
+    
+    if logger:
+        logger.info(f"➕ 创建 LLM 配置: {config.name}")
     
     try:
         # 验证配置
@@ -379,7 +462,15 @@ async def create_llm_config(config: LLMConfigCreate):
 @app.put("/api/llm/configs/{config_id}", response_model=LLMConfigResponse)
 async def update_llm_config(config_id: str, config: LLMConfigUpdate):
     """更新 LLM 模型配置"""
-    logger.info(f"✏️ 更新 LLM 配置: {config_id}")
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    LLMConfigResponse = models['LLMConfigResponse']
+    
+    if logger:
+        logger.info(f"✏️ 更新 LLM 配置: {config_id}")
     
     try:
         # 验证配置存在
@@ -405,7 +496,15 @@ async def update_llm_config(config_id: str, config: LLMConfigUpdate):
 @app.delete("/api/llm/configs/{config_id}")
 async def delete_llm_config(config_id: str):
     """删除 LLM 模型配置"""
-    logger.info(f"🗑️ 删除 LLM 配置: {config_id}")
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    LLMConfigResponse = models['LLMConfigResponse']
+    
+    if logger:
+        logger.info(f"🗑️ 删除 LLM 配置: {config_id}")
     
     try:
         # 删除配置
@@ -422,9 +521,17 @@ async def delete_llm_config(config_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/llm/configs/{config_id}/test")
-async def test_llm_config(config_id: str):
+async def test_llm_config(config_id: str):  
     """测试 LLM 模型配置"""
-    logger.info(f"🧪 测试 LLM 配置: {config_id}")
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    LLMConfigResponse = models['LLMConfigResponse']
+    
+    if logger:
+        logger.info(f"🧪 测试 LLM 配置: {config_id}")
     
     try:
         result = await llm_manager.test_config(config_id)
@@ -449,6 +556,13 @@ async def recognize_speech(
     use_asr_model: Optional[str] = None
 ):
     """语音识别接口"""
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    SpeechRecognitionResponse = models['SpeechRecognitionResponse']
+    
     request_id = generate_response_id()
     logger.info(f"🎤 开始语音识别 [请求ID: {request_id}] - 文件: {audio_file.filename}")
     
@@ -481,6 +595,13 @@ async def recognize_speech(
 @app.post("/api/speech/synthesize", response_model=SpeechSynthesisResponse)
 async def synthesize_speech(request: SpeechSynthesisRequest):
     """语音合成接口"""
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    SpeechSynthesisResponse = models['SpeechSynthesisResponse']
+    
     request_id = generate_response_id()
     logger.info(f"🔊 开始语音合成 [请求ID: {request_id}] - 文本长度: {len(request.text)}")
     
@@ -511,6 +632,13 @@ async def voice_chat(
     session_id: Optional[str] = None
 ):
     """语音对话接口（语音输入 + 文本和语音输出）"""
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    VoiceChatResponse = models['VoiceChatResponse']
+    
     request_id = generate_response_id()
     logger.info(f"💬 开始语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
     
@@ -575,6 +703,13 @@ async def voice_chat(
 @app.post("/api/chat/text", response_model=ChatResponse)
 async def text_chat(request: ChatRequest):
     """文本对话接口"""
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    ChatResponse = models['ChatResponse']
+    
     request_id = generate_response_id()
     logger.info(f"💬 开始文本对话 [请求ID: {request_id}] - 模型: {request.model_name}")
     
@@ -599,6 +734,13 @@ async def text_chat(request: ChatRequest):
 @app.post("/api/chat/stream")
 async def stream_chat(request: ChatRequest):
     """流式文本对话接口"""
+    models = get_response_models()
+    
+    if 'error' in models:
+        raise HTTPException(status_code=500, detail=f"模块导入错误: {models['error']}")
+    
+    ChatResponse = models['ChatResponse']
+    
     request_id = generate_response_id()
     logger.info(f"🌊 开始流式对话 [请求ID: {request_id}] - 模型: {request.model_name}")
     
@@ -635,7 +777,9 @@ async def stream_chat(request: ChatRequest):
 async def get_active_sessions_count() -> int:
     """获取活跃会话数量"""
     try:
-        return await llm_manager.get_active_sessions_count()
+        if llm_manager:
+            return await llm_manager.get_active_sessions_count()
+        return 0
     except:
         return 0
 

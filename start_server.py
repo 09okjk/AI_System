@@ -76,9 +76,35 @@ def check_dependencies():
 def validate_main_app():
     """验证 main.py 是否可以正常导入"""
     try:
+        # 首先检查关键模块是否存在
+        required_modules = [
+            'src.models',
+            'src.config', 
+            'src.mcp',
+            'src.llm',
+            'src.speech',
+            'src.logger',
+            'src.utils'
+        ]
+        
+        missing_modules = []
+        for module in required_modules:
+            try:
+                __import__(module)
+            except ImportError as e:
+                missing_modules.append(f"  - {module}: {str(e)}")
+        
+        if missing_modules:
+            print("❌ 缺少必需模块:")
+            for module in missing_modules:
+                print(module)
+            return False
+        
+        # 然后尝试导入主应用
         from main import app
         print("✅ main.py 导入成功")
         return True
+        
     except Exception as e:
         print(f"❌ main.py 导入失败: {e}")
         return False

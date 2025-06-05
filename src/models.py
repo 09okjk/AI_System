@@ -1,5 +1,5 @@
 """
-API 请求和响应模型定义
+API 请求和响应模型定义 - 完整版
 """
 
 from pydantic import BaseModel, Field, validator
@@ -129,6 +129,32 @@ class LLMConfigBase(BaseModel):
         if v < 0 or v > 1:
             raise ValueError('top_p 参数必须在0-1之间')
         return v
+
+class LLMConfigCreate(LLMConfigBase):
+    """创建 LLM 配置请求"""
+    pass
+
+class LLMConfigUpdate(BaseModel):
+    """更新 LLM 配置请求"""
+    name: Optional[str] = None
+    provider: Optional[LLMProvider] = None
+    model_name: Optional[str] = None
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    system_prompt: Optional[str] = None
+    is_default: Optional[bool] = None
+    enabled: Optional[bool] = None
+
+class LLMConfigResponse(LLMConfigBase):
+    """LLM 配置响应"""
+    id: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    last_used: Optional[datetime] = None
 
 # ==================== 语音处理相关模型 ====================
 
