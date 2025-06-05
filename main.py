@@ -41,24 +41,24 @@ def get_managers():
         from src.utils import validate_config, generate_response_id
 
 #----------------------------------------------------------------------------------------
-        print("开始导入SystemStatusResponse模块...")
+        logger.info("开始导入SystemStatusResponse模块...")
         
         # 尝试分步导入并验证
         import sys
-        print(f"Python 路径: {sys.path}")
+        logger.info(f"Python 路径: {sys.path}")
         
         import src
-        print(f"成功导入 src 模块, 版本: {src.__version__}")
+        logger.info(f"成功导入 src 模块, 版本: {src.__version__}")
         
         import src.models
-        print(f"成功导入 src.models 模块, 包含的类: {dir(src.models)}")
+        logger.info(f"成功导入 src.models 模块, 包含的类: {dir(src.models)}")
         
         # 检查 SystemStatusResponse 是否在模块中
         if hasattr(src.models, 'SystemStatusResponse'):
-            print("✅ SystemStatusResponse 类在 src.models 模块中找到")
+            logger.info("✅ SystemStatusResponse 类在 src.models 模块中找到")
             from src.models import SystemStatusResponse
         else:
-            print("❌ SystemStatusResponse 类在 src.models 模块中未找到")
+            logger.info("❌ SystemStatusResponse 类在 src.models 模块中未找到")
             # 在这里可以自定义一个临时的 SystemStatusResponse 类
             from pydantic import BaseModel
             class SystemStatusResponse(BaseModel):
@@ -101,7 +101,7 @@ def get_managers():
     except Exception as e:
         import traceback
         error_msg = f"导入失败: {str(e)}\n{traceback.format_exc()}"
-        print(f"❌ 详细导入错误: {error_msg}")
+        logger.error(f"❌ 详细导入错误: {error_msg}")
         return {'error': error_msg}
 
 # 创建 FastAPI 应用
