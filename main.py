@@ -22,23 +22,41 @@ project_root = Path(__file__).parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-# 延迟导入，避免循环依赖
 def get_managers():
     """延迟导入管理器类"""
     try:
+        # 确保导入路径正确
+        import sys
+        from pathlib import Path
+        project_root = Path(__file__).parent
+        src_path = project_root / 'src'
+        if str(src_path) not in sys.path:
+            sys.path.insert(0, str(src_path))
+        
+        # 先导入基础模块
+        import src.models
+        from src.models import SystemStatusResponse
+        
+        # 验证导入是否成功
+        if not hasattr(src.models, 'SystemStatusResponse'):
+            raise ImportError("models 模块中找不到 SystemStatusResponse 类")
+            
+        # 然后导入其他类
         from src.config import ConfigManager
         from src.mcp import MCPManager
         from src.llm import LLMManager
         from src.speech import SpeechProcessor
         from src.logger import setup_logger, get_logger
+        from src.utils import validate_config, generate_response_id
+        
+        # 导入其他响应类
         from src.models import (
             LLMConfigCreate, LLMConfigUpdate, LLMConfigResponse, 
             MCPConfigCreate, MCPConfigUpdate, MCPConfigResponse,
-            HealthResponse, SystemStatusResponse, SpeechRecognitionResponse,
+            HealthResponse, SpeechRecognitionResponse,
             SpeechSynthesisResponse, SpeechSynthesisRequest, VoiceChatResponse,
             ChatRequest, ChatResponse
         )
-        from src.utils import validate_config, generate_response_id
         
         return {
             'ConfigManager': ConfigManager,
@@ -51,23 +69,15 @@ def get_managers():
             'generate_response_id': generate_response_id,
             # 导出所有响应模型
             'HealthResponse': HealthResponse,
-            'SystemStatusResponse': SystemStatusResponse,
-            'SpeechRecognitionResponse': SpeechRecognitionResponse,
-            'SpeechSynthesisResponse': SpeechSynthesisResponse,
-            'SpeechSynthesisRequest': SpeechSynthesisRequest,
-            'VoiceChatResponse': VoiceChatResponse,
-            'ChatRequest': ChatRequest,
-            'ChatResponse': ChatResponse,
-            'MCPConfigCreate': MCPConfigCreate,
-            'MCPConfigUpdate': MCPConfigUpdate,
-            'MCPConfigResponse': MCPConfigResponse,
-            'LLMConfigCreate': LLMConfigCreate,
-            'LLMConfigUpdate': LLMConfigUpdate,
-            'LLMConfigResponse': LLMConfigResponse
+            'SystemStatusResponse': SystemStatusResponse,  # 确保这里使用正确导入的类
+            # 其他响应类...
         }
     except ImportError as e:
-        # 如果导入失败，返回一个包含错误信息的字典
-        return {'error': f"导入失败: {str(e)}"}
+        # 更详细的错误信息
+        import traceback
+        error_msg = f"导入失败: {str(e)}\n{traceback.format_exc()}"
+        print(f"❌ 导入错误: {error_msg}")
+        return {'error': error_msg}
 
 # 创建 FastAPI 应用
 app = FastAPI(
