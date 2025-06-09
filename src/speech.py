@@ -275,7 +275,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         try:
             # 设置 CosyVoice 路径
             import sys
-            cosyvoice_path = self.config.get('cosyvoice_path', 'tools/CosyVoice')
+            cosyvoice_path = self.config.get('cosyvoice_path', 'tools/CosyVoice/CosyVoice')
             if cosyvoice_path not in sys.path:
                 sys.path.append(cosyvoice_path)
             
