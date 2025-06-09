@@ -275,7 +275,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         try:
             # 设置 CosyVoice 路径
             import sys
-            cosyvoice_path = self.config.get('cosyvoice_path', 'tools/CosyVoice/CosyVoice')
+            cosyvoice_path = self.config.get('cosyvoice_path', 'tools/CosyVoice')
             if cosyvoice_path not in sys.path:
                 sys.path.append(cosyvoice_path)
             
@@ -593,7 +593,7 @@ class SpeechProcessor:
             # CosyVoice 配置
             'cosyvoice': {
                 'model_dir': os.getenv('COSYVOICE_MODEL_DIR', '/home/rh/Program/MCP_Tools/CosyVoice/pretrained_models/CosyVoice2-0.5B'),
-                'cosyvoice_path': os.getenv('COSYVOICE_PATH', 'tools/CosyVoice/CosyVoice'),
+                'cosyvoice_path': os.getenv('COSYVOICE_PATH', 'tools/CosyVoice'),
                 'reference_audio': os.getenv('COSYVOICE_REF_AUDIO', None),
                 'reference_text': os.getenv('COSYVOICE_REF_TEXT', '参考音频文本'),
                 'load_jit': os.getenv('COSYVOICE_LOAD_JIT', 'false').lower() == 'true',
