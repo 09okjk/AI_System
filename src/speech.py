@@ -285,7 +285,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             import torchaudio
             
             # 模型配置
-            model_dir = self.config.get('model_dir', 'pretrained_models/CosyVoice2-0.5B')
+            model_dir = self.config.get('model_dir', '/home/rh/Program/MCP_Tools/CosyVoice/pretrained_models/CosyVoice2-0.5B')
             
             # 检查模型目录
             if not Path(model_dir).exists():
