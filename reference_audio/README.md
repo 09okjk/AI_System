@@ -17,7 +17,7 @@ CosyVoice2模型需要一个参考音频来模仿其声音特征。您可以在�
 1. 将您的参考音频文件放在此文件夹中
 2. 在配置文件中指定参考音频路径：
 
-   ```
+   ```bash
    COSYVOICE_REF_AUDIO=reference_audio/your_audio_file.wav
    ```
 
@@ -33,5 +33,5 @@ CosyVoice2模型需要一个参考音频来模仿其声音特征。您可以在�
 
 ## 默认参考音频
 
-默认参考音频文件: `default_reference.wav` 
+默认参考音频文件: `default_reference.wav` ,
 默认参考文本: "这是一段用于语音合成的参考音频"

@@ -116,7 +116,7 @@ async def example_usage():
     request = {
         "action": "call_function",
         "name": "initialize_model",
-        "arguments": {"model_dir": "pretrained_models/CosyVoice2-0.5B"}
+        "arguments": {"model_dir": "/home/rh/Program/MCP_Tools/CosyVoice/pretrained_models/CosyVoice2-0.5B"}
     }
     await websocket.send(json.dumps(request))
     response = await websocket.recv()
