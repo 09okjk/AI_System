@@ -1,13 +1,15 @@
-# AI Agent 后端服务 v2.0
+# AI Agent 后端服务 v2.1
 
 一个现代化的 AI 智能代理后端服务，基于 Python FastAPI 构建，专注于提供高性能的 API 接口服务。
 
 ## 🎯 项目特点
 
 - **纯后端架构**: 专注于 API 服务，前后端完全分离
+- **模块化设计**: API接口按功能分离，便于维护和扩展
 - **多模型支持**: 集成多种 LLM 提供商（DashScope、Xinference、OpenAI、Anthropic 等）
 - **MCP 工具系统**: 支持 Model Context Protocol 工具扩展
 - **语音处理**: 集成语音识别和语音合成功能（SensVoice、Whisper、CosyVoice、Edge TTS）
+- **MongoDB数据管理**: 支持文字和图片混合数据的增删改查
 - **完整日志系统**: 结构化日志记录，运行步骤可视化
 - **配置管理**: 灵活的配置系统，支持动态更新
 - **测试框架**: 完整的测试套件，包括单元测试、集成测试和性能测试
@@ -20,17 +22,26 @@ AI_Agent_Backend/
 ├── main.py                  # FastAPI 应用定义
 ├── start_server.py         # 启动脚本（推荐使用）
 ├── test_runner.py          # 测试运行器
+├── install_mongodb.sh      # MongoDB 安装脚本
 ├── requirements.txt        # 依赖包列表
 ├── .env.example           # 环境变量示例
+├── api/                    # API模块目录（新增）
+│   ├── __init__.py        # 路由注册
+│   ├── core_api.py        # 核心接口（系统状态、对话）
+│   ├── mcp_api.py         # MCP配置接口
+│   ├── llm_api.py         # LLM配置接口
+│   ├── speech_api.py      # 语音处理接口
+│   └── mongodb_api.py     # MongoDB数据管理接口（新增）
 ├── src/
 │   ├── __init__.py
-│   ├── models.py          # 数据模型定义
+│   ├── models.py          # 数据模型定义（已扩展）
 │   ├── logger.py          # 日志系统
 │   ├── config.py          # 配置管理
 │   ├── utils.py           # 工具函数
 │   ├── mcp.py             # MCP管理器
 │   ├── llm.py             # LLM管理器
-│   └── speech.py          # 语音处理器
+│   ├── speech.py          # 语音处理器
+│   └── mongodb_manager.py # MongoDB管理器（新增）
 ├── config/                 # 配置文件目录
 │   ├── mcp_configs.json
 │   ├── llm_configs.json
@@ -39,7 +50,8 @@ AI_Agent_Backend/
 │   └── math_server.py     # 数学计算工具示例
 ├── logs/                   # 日志文件目录
 ├── tests/                  # 测试文件目录
-└── assets/                 # 资源文件目录
+├── assets/                 # 资源文件目录
+└── reference_audio/        # 参考音频文件目录
 ```
 
 ## 🚀 快速开始
@@ -47,9 +59,10 @@ AI_Agent_Backend/
 ### 环境要求
 
 - Python 3.8+
+- MongoDB 4.4+（新增）
 - pip 或 conda
 
-### 安装依赖
+### 1. 安装依赖
 
 ```bash
 # 克隆项目
@@ -60,7 +73,23 @@ cd AI_System
 pip install -r requirements.txt
 ```
 
-### 环境变量配置
+### 2. 安装和配置MongoDB
+
+```bash
+# 使用安装脚本（Ubuntu 24.04）
+chmod +x install_mongodb.sh
+./install_mongodb.sh
+
+# 或手动安装
+sudo apt update
+sudo apt install -y mongodb
+
+# 启动MongoDB服务
+sudo systemctl start mongod
+sudo systemctl enable mongod
+```
+
+### 3. 环境变量配置
 
 1. 复制示例环境文件：
 
@@ -68,7 +97,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-2. 编辑 `.env` 文件，配置您的 API 密钥：
+2. 编辑 `.env` 文件，配置您的 API 密钥和MongoDB连接：
 
 ```env
 # DashScope API 配置
@@ -81,6 +110,13 @@ XINFERENCE_ENDPOINT=http://localhost:9997/v1
 # OpenAI API 配置
 OPENAI_API_KEY=your_openai_api_key_here
 
+# MongoDB 配置（新增）
+MONGODB_HOST=localhost
+MONGODB_PORT=27017
+MONGODB_DATABASE=ai_system
+MONGODB_USERNAME=
+MONGODB_PASSWORD=
+
 # 语音模型配置
 COSYVOICE_MODEL_DIR=pretrained_models/CosyVoice2-0.5B
 WHISPER_MODEL_SIZE=base
@@ -92,7 +128,7 @@ SERVER_PORT=8000
 LOG_LEVEL=INFO
 ```
 
-### 启动服务
+### 4. 启动服务
 
 **推荐方式（使用 start_server.py）：**
 
@@ -116,7 +152,7 @@ python main.py --reload
 服务启动后，访问以下地址：
 
 - **API 文档**: http://localhost:8000/docs
-- **ReDoc 文档**: http://localhost:8000/redoc
+- **ReDoc 文档**: http://localhost:8000/redoc  
 - **健康检查**: http://localhost:8000/api/health
 
 ## 📚 API 接口文档
@@ -125,6 +161,25 @@ python main.py --reload
 
 - `GET /api/health` - 健康检查
 - `GET /api/status` - 系统详细状态
+
+### MongoDB 数据管理（新增）
+
+#### 数据文档管理
+- `POST /api/data/documents` - 创建数据文档
+- `GET /api/data/documents` - 列出数据文档（支持分页、搜索、标签筛选）
+- `GET /api/data/documents/{id}` - 获取特定数据文档
+- `PUT /api/data/documents/{id}` - 更新数据文档
+- `DELETE /api/data/documents/{id}` - 删除数据文档
+- `GET /api/data/documents/search` - 搜索数据文档
+- `GET /api/data/statistics` - 获取数据统计信息
+
+#### 数据项管理
+- `POST /api/data/documents/{id}/items` - 向文档添加数据项
+- `PUT /api/data/documents/{id}/items/{sequence}` - 更新数据项
+- `DELETE /api/data/documents/{id}/items/{sequence}` - 删除数据项
+
+#### 图片管理
+- `POST /api/data/upload-image` - 上传图片并转换为base64
 
 ### MCP 工具管理
 
@@ -153,6 +208,85 @@ python main.py --reload
 - `POST /api/chat/stream` - 流式对话
 - `POST /api/chat/voice` - 语音对话（语音输入 + 文本和语音输出）
 
+## 🗄️ MongoDB 数据管理使用示例
+
+### 创建数据文档
+
+```bash
+curl -X POST "http://localhost:8000/api/data/documents" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "产品介绍文档",
+    "description": "包含产品图片和描述的文档",
+    "data_list": [
+      {
+        "sequence": 1,
+        "text": "这是我们的新产品介绍",
+        "image": null,
+        "image_filename": null,
+        "image_mimetype": null
+      },
+      {
+        "sequence": 2,
+        "text": "产品特性说明",
+        "image": "base64_encoded_image_data_here",
+        "image_filename": "product.jpg",
+        "image_mimetype": "image/jpeg"
+      }
+    ],
+    "tags": ["产品", "介绍", "营销"],
+    "metadata": {
+      "category": "产品文档",
+      "version": "1.0"
+    }
+  }'
+```
+
+### 上传图片
+
+```bash
+curl -X POST "http://localhost:8000/api/data/upload-image" \
+  -F "image=@/path/to/your/image.jpg"
+```
+
+### 搜索文档
+
+```bash
+curl -X GET "http://localhost:8000/api/data/documents/search?q=产品&limit=10"
+```
+
+### 获取统计信息
+
+```bash
+curl -X GET "http://localhost:8000/api/data/statistics"
+```
+
+### 数据模型结构
+
+```json
+{
+  "id": "文档ID",
+  "name": "数据名称",
+  "description": "数据描述",
+  "data_list": [
+    {
+      "sequence": 1,
+      "text": "文字内容",
+      "image": "base64编码的图片数据",
+      "image_filename": "图片文件名",
+      "image_mimetype": "图片MIME类型"
+    }
+  ],
+  "tags": ["标签1", "标签2"],
+  "metadata": {
+    "自定义字段": "值"
+  },
+  "created_at": "创建时间",
+  "updated_at": "更新时间",
+  "version": "版本号"
+}
+```
+
 ## 🧪 测试系统
 
 ### 运行所有测试
@@ -175,6 +309,34 @@ python test_runner.py --output test_report.json
 ```
 
 ## 📋 配置管理
+
+### MongoDB数据文档配置示例
+
+```json
+{
+  "name": "客户信息文档",
+  "description": "包含客户基本信息和照片",
+  "data_list": [
+    {
+      "sequence": 1,
+      "text": "客户姓名：张三",
+      "image": null
+    },
+    {
+      "sequence": 2,
+      "text": "客户照片",
+      "image": "base64_encoded_photo_data",
+      "image_filename": "customer_photo.jpg",
+      "image_mimetype": "image/jpeg"
+    }
+  ],
+  "tags": ["客户", "CRM", "重要"],
+  "metadata": {
+    "department": "销售部",
+    "priority": "high"
+  }
+}
+```
 
 ### MCP 工具配置示例
 
@@ -220,7 +382,7 @@ python test_runner.py --output test_report.json
 
 ```json
 {
-  "timestamp": "2025-06-05T02:48:25.000Z",
+  "timestamp": "2025-06-11T06:43:48.000Z",
   "level": "INFO",
   "logger": "main",
   "message": "🚀 AI Agent Backend 正在启动...",
@@ -228,7 +390,7 @@ python test_runner.py --output test_report.json
   "extra": {
     "api_call": {
       "method": "POST",
-      "endpoint": "/api/chat/text",
+      "endpoint": "/api/data/documents",
       "status_code": 200,
       "processing_time": 1.23
     }
@@ -259,12 +421,30 @@ tail -f logs/ai_agent.log | jq '.'
 python start_server.py --check-only
 ```
 
+### 模块化架构说明
+
+项目采用模块化设计，API接口按功能分离：
+
+- **api/core_api.py**: 核心系统接口（健康检查、状态、对话）
+- **api/mcp_api.py**: MCP工具配置管理接口
+- **api/llm_api.py**: LLM模型配置管理接口
+- **api/speech_api.py**: 语音处理相关接口
+- **api/mongodb_api.py**: MongoDB数据管理接口
+
 ### 添加新的 API 接口
 
-1. 在 `src/models.py` 中定义请求/响应模型
-2. 在 `main.py` 中添加路由处理函数
+1. 在对应的API模块中添加新的路由处理函数
+2. 在 `src/models.py` 中定义请求/响应模型
 3. 添加相应的日志记录
 4. 编写单元测试
+5. 更新API文档
+
+### 添加新的数据处理功能
+
+1. 在 `src/mongodb_manager.py` 中实现数据处理逻辑
+2. 在 `api/mongodb_api.py` 中添加API接口
+3. 在 `src/models.py` 中定义数据模型
+4. 添加相应的验证逻辑
 
 ### 集成新的 LLM 提供商
 
@@ -307,20 +487,37 @@ python start_server.py --check-only
    python start_server.py --log-level DEBUG
    ```
 
-2. **模型调用失败**
+2. **MongoDB连接失败**
+   ```bash
+   # 检查MongoDB服务状态
+   sudo systemctl status mongod
+   
+   # 启动MongoDB服务
+   sudo systemctl start mongod
+   
+   # 检查连接配置
+   echo $MONGODB_HOST $MONGODB_PORT
+   ```
+
+3. **模型调用失败**
    - 检查 API 密钥配置：`cat .env | grep API_KEY`
    - 验证网络连接
    - 查看模型配置：`curl http://localhost:8000/api/llm/configs`
 
-3. **MCP 工具无法启动**
+4. **MCP 工具无法启动**
    - 检查工具脚本权限：`ls -la tools/`
    - 测试工具配置：`curl -X POST http://localhost:8000/api/mcp/configs/{id}/test`
    - 查看 MCP 日志
 
-4. **语音处理失败**
+5. **语音处理失败**
    - 检查模型文件路径
    - 验证音频格式支持
    - 查看语音处理器状态
+
+6. **数据上传失败**
+   - 检查文件大小限制（默认5MB）
+   - 验证图片格式支持
+   - 查看MongoDB存储空间
 
 ### 调试技巧
 
@@ -333,6 +530,9 @@ curl http://localhost:8000/api/health
 
 # 查看详细状态
 curl http://localhost:8000/api/status
+
+# 检查MongoDB连接
+curl http://localhost:8000/api/data/statistics
 
 # 测试特定功能
 python test_runner.py --test-type integration
@@ -358,10 +558,15 @@ python start_server.py --workers 4 --log-level INFO
 
 ```dockerfile
 FROM python:3.9-slim
+
+# 安装MongoDB客户端
+RUN apt-get update && apt-get install -y mongodb-clients
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 COPY . .
+
 CMD ["python", "start_server.py", "--host", "0.0.0.0", "--workers", "4"]
 ```
 
@@ -374,6 +579,8 @@ CMD ["python", "start_server.py", "--host", "0.0.0.0", "--workers", "4"]
 - CPU 使用率
 - 语音处理延迟
 - MCP 工具状态
+- MongoDB 连接状态
+- 数据存储使用量
 
 ## 🚀 部署指南
 
@@ -383,7 +590,10 @@ CMD ["python", "start_server.py", "--host", "0.0.0.0", "--workers", "4"]
 # 构建镜像
 docker build -t ai-agent-backend .
 
-# 运行容器
+# 运行容器（包含MongoDB）
+docker-compose up -d
+
+# 或单独运行
 docker run -p 8000:8000 -v $(pwd)/.env:/app/.env ai-agent-backend
 ```
 
@@ -396,6 +606,18 @@ sudo systemctl edit --force --full ai-agent-backend.service
 # 启动服务
 sudo systemctl enable ai-agent-backend
 sudo systemctl start ai-agent-backend
+```
+
+### MongoDB集群部署
+
+对于生产环境，建议配置MongoDB副本集：
+
+```bash
+# 配置副本集
+mongo --eval "rs.initiate()"
+
+# 添加副本节点
+mongo --eval "rs.add('hostname:27017')"
 ```
 
 ## 🤝 贡献指南
@@ -412,6 +634,18 @@ sudo systemctl start ai-agent-backend
 - 遵循 PEP 8 规范
 - 添加适当的类型注解
 - 编写完整的文档字符串
+- API接口按功能模块分离
+- 数据模型定义完整的验证规则
+
+### 提交规范
+
+- feat: 新功能
+- fix: 修复问题
+- docs: 文档更新
+- style: 代码格式调整
+- refactor: 代码重构
+- test: 测试相关
+- chore: 构建过程或辅助工具变动
 
 ## 📄 许可证
 
@@ -429,6 +663,24 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 
 ## 📝 更新日志
 
+### v2.1.0 (2025-06-11)
+
+- 🎉 **重大更新**: 添加MongoDB数据管理功能
+- 🔧 **架构重构**: API接口模块化分离
+- 📄 **数据管理**: 支持文字和图片混合数据的完整CRUD操作
+- 🖼️ **图片处理**: 支持图片上传和base64编码存储
+- 🔍 **搜索功能**: 文档全文搜索和标签筛选
+- 📊 **统计功能**: 数据使用情况统计和分析
+- 🏗️ **模块分离**: 
+  - `api/core_api.py` - 核心系统接口
+  - `api/mcp_api.py` - MCP工具管理
+  - `api/llm_api.py` - LLM模型管理
+  - `api/speech_api.py` - 语音处理
+  - `api/mongodb_api.py` - 数据管理
+- 🔧 **数据管理器**: 新增 `src/mongodb_manager.py`
+- 📝 **模型扩展**: 扩展数据模型支持MongoDB操作
+- 🚀 **向后兼容**: 保持与 `start_server.py` 的完全兼容
+
 ### v2.0.0 (2025-06-05)
 
 - 🎉 重构为纯后端架构
@@ -443,17 +695,15 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 
 **Made with ❤️ by [09okjk](https://github.com/09okjk)**
 
-## 🔄 主要更新内容
+## 🔄 本次更新重点
 
-1. **更新了项目结构** - 反映了实际的文件组织
-2. **强调使用 start_server.py** - 作为推荐的启动方式
-3. **完善了环境配置说明** - 详细的环境变量配置步骤
-4. **添加了语音处理详情** - 具体支持的引擎和配置
-5. **丰富了故障排除部分** - 更详细的调试步骤
-6. **添加了部署指南** - Docker 和系统服务部署
-7. **完善了贡献指南** - 代码规范和提交流程
-8. **添加了更新日志** - 版本变更记录
-9. **修正了启动命令** - 使用正确的启动脚本
-10. **添加了性能优化建议** - 开发和生产环境配置
+1. **MongoDB数据管理** - 完整的数据库支持，包含文字和图片混合数据
+2. **模块化重构** - API接口按功能分离，提高代码可维护性
+3. **图片处理** - 支持图片上传、base64编码和数据库存储
+4. **数据搜索** - 全文搜索和标签筛选功能
+5. **统计分析** - 数据使用情况的详细统计
+6. **向后兼容** - 保持与现有启动方式的完全兼容
+7. **环境配置** - 新增MongoDB相关的环境变量配置
+8. **部署支持** - 提供MongoDB安装脚本和配置指南
 
-这个更新后的 README 更准确地反映了您项目的实际架构和使用方式，特别是强调了 `start_server.py` 作为推荐启动方式的重要性。
+这次更新将AI Agent后端服务扩展为一个功能完整的数据管理平台，同时保持了原有的所有功能特性。
