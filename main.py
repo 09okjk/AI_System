@@ -25,6 +25,7 @@ def get_managers():
         from src.mcp import MCPManager
         from src.llm import LLMManager
         from src.speech import SpeechProcessor
+        from src.mongodb_manager import MongoDBManager
         from src.logger import setup_logger, get_logger
         
         return {
@@ -32,6 +33,7 @@ def get_managers():
             'MCPManager': MCPManager,
             'LLMManager': LLMManager,
             'SpeechProcessor': SpeechProcessor,
+            'MongoDBManager': MongoDBManager,
             'setup_logger': setup_logger,
             'get_logger': get_logger,
         }
@@ -42,7 +44,7 @@ def get_managers():
 # 创建 FastAPI 应用
 app = FastAPI(
     title="AI Agent Backend API",
-    description="AI智能代理后端服务，支持MCP配置、模型管理和语音处理",
+    description="AI智能代理后端服务，支持MCP配置、模型管理、语音处理和MongoDB数据管理",
     version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
@@ -63,6 +65,7 @@ config_manager = None
 mcp_manager = None
 llm_manager = None
 speech_processor = None
+mongodb_manager = None
 logger = None
 
 # 提前注册路由（确保 start_server.py 能够检测到）
@@ -76,7 +79,7 @@ except ImportError as e:
 @app.on_event("startup")
 async def startup_event():
     """应用启动时的初始化"""
-    global managers, config_manager, mcp_manager, llm_manager, speech_processor, logger
+    global managers, config_manager, mcp_manager, llm_manager, speech_processor, mongodb_manager, logger
     
     # 获取管理器类
     managers = get_managers()
@@ -98,6 +101,7 @@ async def startup_event():
         mcp_manager = managers['MCPManager']()
         llm_manager = managers['LLMManager']()
         speech_processor = managers['SpeechProcessor']()
+        mongodb_manager = managers['MongoDBManager']()
         
         # 依次初始化
         await config_manager.initialize()
@@ -111,6 +115,9 @@ async def startup_event():
         
         await speech_processor.initialize()
         logger.info("✅ 语音处理器初始化完成")
+        
+        await mongodb_manager.initialize()
+        logger.info("✅ MongoDB 管理器初始化完成")
         
         # 如果路由还没有注册，再次尝试注册
         if not hasattr(app, '_routes_registered'):
@@ -136,6 +143,8 @@ async def shutdown_event():
         logger.info("🔄 AI Agent Backend 正在关闭...")
     
     try:
+        if mongodb_manager:
+            await mongodb_manager.cleanup()
         if speech_processor:
             await speech_processor.cleanup()
         if llm_manager:

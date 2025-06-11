@@ -224,30 +224,127 @@ class VoiceChatResponse(BaseResponse):
     model_used: str
     processing_time: Dict[str, float]
 
-# ==================== 验证器 ====================
 
-# @field_validator('api_key')
-# def validate_api_key(cls, v):
-#     """验证 API 密钥格式"""
-#     if v and len(v) < 10:
-#         raise ValueError('API 密钥长度不能少于10个字符')
-#     return v
+# ==================== MongoDB 数据管理模型 ====================
 
-# @field_validator('temperature')
-# def validate_temperature(cls, v):
-#     """验证温度参数"""
-#     if v < 0 or v > 2:
-#         raise ValueError('温度参数必须在0-2之间')
-#     return v
+from bson import ObjectId
+import base64
 
-# @field_validator('top_p')
-# def validate_top_p(cls, v):
-#     """验证 top_p 参数"""
-#     if v < 0 or v > 1:
-#         raise ValueError('top_p 参数必须在0-1之间')
-#     return v
+class PyObjectId(ObjectId):
+    """自定义 ObjectId 类型"""
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate
 
-# # 将验证器添加到相应的模型中
-# LLMConfigBase.__validators__['validate_api_key'] = validator('api_key', allow_reuse=True)(validate_api_key)
-# LLMConfigBase.__validators__['validate_temperature'] = validator('temperature', allow_reuse=True)(validate_temperature)
-# LLMConfigBase.__validators__['validate_top_p'] = validator('top_p', allow_reuse=True)(validate_top_p)
+    @classmethod
+    def validate(cls, v):
+        if not ObjectId.is_valid(v):
+            raise ValueError("Invalid ObjectId")
+        return ObjectId(v)
+
+    @classmethod
+    def __modify_schema__(cls, field_schema):
+        field_schema.update(type="string")
+
+class DataItemContent(BaseModel):
+    """数据项内容模型"""
+    sequence: int = Field(..., description="序号")
+    text: str = Field(..., description="文字内容")
+    image: Optional[str] = Field(None, description="图片数据（base64编码）")
+    image_filename: Optional[str] = Field(None, description="图片文件名")
+    image_mimetype: Optional[str] = Field(None, description="图片MIME类型")
+
+    @field_validator('image')
+    @classmethod
+    def validate_image(cls, v):
+        """验证图片数据"""
+        if v:
+            try:
+                # 尝试解码base64数据
+                base64.b64decode(v)
+            except Exception:
+                raise ValueError("图片数据必须是有效的base64编码")
+        return v
+
+class DataDocumentBase(BaseModel):
+    """数据文档基础模型"""
+    name: str = Field(..., description="数据名称")
+    description: Optional[str] = Field(None, description="数据描述")
+    data_list: List[DataItemContent] = Field(..., description="数据列表")
+    tags: List[str] = Field(default_factory=list, description="标签")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="元数据")
+
+    @field_validator('data_list')
+    @classmethod
+    def validate_data_list(cls, v):
+        """验证数据列表"""
+        if not v:
+            raise ValueError("数据列表不能为空")
+        
+        # 检查序号是否重复
+        sequences = [item.sequence for item in v]
+        if len(sequences) != len(set(sequences)):
+            raise ValueError("数据列表中的序号不能重复")
+        
+        return v
+
+class DataDocumentCreate(DataDocumentBase):
+    """创建数据文档请求"""
+    pass
+
+class DataDocumentUpdate(BaseModel):
+    """更新数据文档请求"""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    data_list: Optional[List[DataItemContent]] = None
+    tags: Optional[List[str]] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+class DataDocumentResponse(DataDocumentBase):
+    """数据文档响应"""
+    id: str = Field(..., description="文档ID")
+    created_at: datetime = Field(..., description="创建时间")
+    updated_at: datetime = Field(..., description="更新时间")
+    version: int = Field(1, description="版本号")
+
+    class Config:
+        arbitrary_types_allowed = True
+        json_encoders = {ObjectId: str}
+
+class DataDocumentListResponse(BaseResponse):
+    """数据文档列表响应"""
+    documents: List[DataDocumentResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+class DataDocumentQuery(BaseModel):
+    """数据文档查询参数"""
+    name: Optional[str] = Field(None, description="按名称搜索")
+    tags: Optional[List[str]] = Field(None, description="按标签筛选")
+    page: int = Field(1, description="页码", ge=1)
+    page_size: int = Field(10, description="每页大小", ge=1, le=100)
+    sort_by: str = Field("created_at", description="排序字段")
+    sort_order: int = Field(-1, description="排序顺序 (1:升序, -1:降序)")
+
+class DataDocumentSearchResponse(BaseResponse):
+    """数据文档搜索响应"""
+    results: List[DataDocumentResponse]
+    total_matches: int
+    search_time: float
+
+class DataItemResponse(BaseResponse):
+    """数据项响应"""
+    item: DataItemContent
+    document_id: str
+    document_name: str
+
+class DataStatisticsResponse(BaseResponse):
+    """数据统计响应"""
+    total_documents: int
+    total_items: int
+    total_images: int
+    storage_size: str
+    most_used_tags: List[Dict[str, Any]]
+    recent_activity: List[Dict[str, Any]]
