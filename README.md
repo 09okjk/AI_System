@@ -152,7 +152,7 @@ python main.py --reload
 服务启动后，访问以下地址：
 
 - **API 文档**: http://localhost:8000/docs
-- **ReDoc 文档**: http://localhost:8000/redoc  
+- **ReDoc 文档**: http://localhost:8000/redoc
 - **健康检查**: http://localhost:8000/api/health
 
 ## 📚 API 接口文档
@@ -165,6 +165,7 @@ python main.py --reload
 ### MongoDB 数据管理（新增）
 
 #### 数据文档管理
+
 - `POST /api/data/documents` - 创建数据文档
 - `GET /api/data/documents` - 列出数据文档（支持分页、搜索、标签筛选）
 - `GET /api/data/documents/{id}` - 获取特定数据文档
@@ -174,11 +175,13 @@ python main.py --reload
 - `GET /api/data/statistics` - 获取数据统计信息
 
 #### 数据项管理
+
 - `POST /api/data/documents/{id}/items` - 向文档添加数据项
 - `PUT /api/data/documents/{id}/items/{sequence}` - 更新数据项
 - `DELETE /api/data/documents/{id}/items/{sequence}` - 删除数据项
 
 #### 图片管理
+
 - `POST /api/data/upload-image` - 上传图片并转换为base64
 
 ### MCP 工具管理
@@ -488,6 +491,7 @@ python start_server.py --check-only
    ```
 
 2. **MongoDB连接失败**
+
    ```bash
    # 检查MongoDB服务状态
    sudo systemctl status mongod
@@ -671,7 +675,7 @@ MIT License - 详见 [LICENSE](LICENSE) 文件
 - 🖼️ **图片处理**: 支持图片上传和base64编码存储
 - 🔍 **搜索功能**: 文档全文搜索和标签筛选
 - 📊 **统计功能**: 数据使用情况统计和分析
-- 🏗️ **模块分离**: 
+- 🏗️ **模块分离**:
   - `api/core_api.py` - 核心系统接口
   - `api/mcp_api.py` - MCP工具管理
   - `api/llm_api.py` - LLM模型管理
