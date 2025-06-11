@@ -65,6 +65,14 @@ llm_manager = None
 speech_processor = None
 logger = None
 
+# 提前注册路由（确保 start_server.py 能够检测到）
+try:
+    from api import register_routers
+    register_routers(app)
+except ImportError as e:
+    # 如果导入失败，会在启动时处理
+    print(f"⚠️ 路由注册延迟: {e}")
+
 @app.on_event("startup")
 async def startup_event():
     """应用启动时的初始化"""
@@ -104,10 +112,16 @@ async def startup_event():
         await speech_processor.initialize()
         logger.info("✅ 语音处理器初始化完成")
         
-        # 注册路由
-        from api import register_routers
-        register_routers(app)
-        logger.info("✅ API 路由注册完成")
+        # 如果路由还没有注册，再次尝试注册
+        if not hasattr(app, '_routes_registered'):
+            try:
+                from api import register_routers
+                register_routers(app)
+                app._routes_registered = True
+                logger.info("✅ API 路由注册完成")
+            except Exception as route_error:
+                logger.error(f"❌ 路由注册失败: {route_error}")
+                raise
         
         logger.info("🎉 AI Agent Backend 启动成功！")
         
