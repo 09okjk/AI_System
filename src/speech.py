@@ -273,23 +273,39 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
     async def _setup(self):
         """设置 CosyVoice - 根据官方最佳实践"""
         try:
-            # 设置 CosyVoice 路径
+            # 设置 CosyVoice 路径 - 修复路径配置
             import sys
+            
+            # 添加 CosyVoice 主目录
             cosyvoice_path = self.config.get('cosyvoice_path', 'tools/CosyVoice')
-            logger.info(f"CosyVoice 路径: {cosyvoice_path}")
             if cosyvoice_path not in sys.path:
                 sys.path.append(cosyvoice_path)
+                
+            # 添加 Matcha-TTS 路径（根据官方文档）
+            matcha_path = os.path.join(cosyvoice_path, 'third_party/Matcha-TTS')
+            if os.path.exists(matcha_path) and matcha_path not in sys.path:
+                sys.path.append(matcha_path)
+                
+            logger.info(f"CosyVoice 路径: {cosyvoice_path}")
+            logger.info(f"Matcha-TTS 路径: {matcha_path}")
+            logger.info(f"当前 Python 路径: {sys.path[-2:]}")  # 显示最后添加的路径
             
-            # 导入 CosyVoice
-            from cosyvoice.cli.cosyvoice import CosyVoice2
-            from cosyvoice.utils.file_utils import load_wav
-            import torchaudio
+            # 导入 CosyVoice - 添加更详细的错误信息
+            try:
+                from cosyvoice.cli.cosyvoice import CosyVoice2
+                from cosyvoice.utils.file_utils import load_wav
+                import torchaudio
+                logger.info("✅ CosyVoice 模块导入成功")
+            except ImportError as import_err:
+                logger.error(f"❌ CosyVoice 模块导入失败: {import_err}")
+                logger.error(f"检查路径: {[p for p in sys.path if 'CosyVoice' in p]}")
+                raise
             
             # 模型配置
             model_dir = self.config.get('model_dir', '/home/rh/Program/MCP_Tools/CosyVoice/pretrained_models/CosyVoice2-0.5B')
             logger.info(f"CosyVoice 模型目录: {model_dir}")
             logger.info(f"CosyVoice 模型目录存在: {Path(model_dir).exists()}")
-            
+
             # 检查模型目录
             if not Path(model_dir).exists():
                 raise FileNotFoundError(f"CosyVoice 模型目录不存在: {model_dir}")
