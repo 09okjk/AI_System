@@ -276,6 +276,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             # 设置 CosyVoice 路径
             import sys
             cosyvoice_path = self.config.get('cosyvoice_path', 'tools/CosyVoice')
+            logger.info(f"CosyVoice 路径: {cosyvoice_path}")
             if cosyvoice_path not in sys.path:
                 sys.path.append(cosyvoice_path)
             
@@ -286,6 +287,8 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             
             # 模型配置
             model_dir = self.config.get('model_dir', '/home/rh/Program/MCP_Tools/CosyVoice/pretrained_models/CosyVoice2-0.5B')
+            logger.info(f"CosyVoice 模型目录: {model_dir}")
+            logger.info(f"CosyVoice 模型目录存在: {Path(model_dir).exists()}")
             
             # 检查模型目录
             if not Path(model_dir).exists():
@@ -550,6 +553,7 @@ class MockSynthesizer(SpeechSynthesizer):
                        pitch: float = 1.0,
                        **kwargs) -> Dict[str, Any]:
         """模拟语音合成"""
+        logger.info(f"🔊 开始模拟语音合成 [请求ID: {request_id}] - 文本长度: {len(request.text)}")
         start_time = time.time()
         
         # 生成模拟的静音音频
