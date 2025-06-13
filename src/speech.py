@@ -341,7 +341,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                         language: str = "zh-CN",
                         speed: float = 1.0,
                         pitch: float = 1.0,
-                        synthesis_mode: str = "zero_shot",
+                        synthesis_mode: str = "instruct",
                         **kwargs) -> Dict[str, Any]:
         """CosyVoice 语音合成 - 支持多种合成模式"""
         start_time = time.time()
