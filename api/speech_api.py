@@ -129,7 +129,7 @@ async def voice_chat(
             request_id=request_id
         )
         
-        response_text = chat_response.content
+        response_text = chat_response["content"]
         logger.info(f"💭 LLM 响应 [请求ID: {request_id}]: {response_text[:100]}...")
         
         # 3. 语音合成
