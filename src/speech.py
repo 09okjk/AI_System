@@ -569,7 +569,7 @@ class MockSynthesizer(SpeechSynthesizer):
                        pitch: float = 1.0,
                        **kwargs) -> Dict[str, Any]:
         """模拟语音合成"""
-        logger.info(f"🔊 开始模拟语音合成 [请求ID: {request_id}] - 文本长度: {len(request.text)}")
+        logger.info(f"🔊 开始模拟语音合成 - 文本长度: {len(text)}")
         start_time = time.time()
         
         # 生成模拟的静音音频
