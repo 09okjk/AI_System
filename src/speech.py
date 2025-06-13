@@ -500,11 +500,11 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         # 加载参考音频
         reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
         
-        # 执行指令式合成
+        # 执行指令式合成 - 使用正确的方法名 inference_instruct2
         output_audio = None
         stream = kwargs.get('stream', False)
         
-        for i, result in enumerate(self.model.inference_instruct(
+        for i, result in enumerate(self.model.inference_instruct2(
             text, instruction, reference_audio, stream=stream
         )):
             output_audio = result['tts_speech']
