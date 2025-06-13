@@ -266,8 +266,14 @@ async def voice_chat_stream(
                             request_id=f"{request_id}_seg_{int(time.time())}"
                         )
                         
+                        # 确保音频数据是字节类型，然后转换为Base64
+                        audio_data = synthesis_result.audio_data
+                        if isinstance(audio_data, str):
+                            # 如果是字符串，需要先编码为字节
+                            audio_data = audio_data.encode('utf-8')
+                            
                         # 将二进制音频数据转换为Base64编码的字符串
-                        audio_base64 = base64.b64encode(synthesis_result.audio_data).decode('utf-8')
+                        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
                         
                         # 发送音频段
                         yield json.dumps({
@@ -300,8 +306,14 @@ async def voice_chat_stream(
                         request_id=f"{request_id}_final"
                     )
                     
+                    # 确保音频数据是字节类型，然后转换为Base64
+                    audio_data = synthesis_result.audio_data
+                    if isinstance(audio_data, str):
+                        # 如果是字符串，需要先编码为字节
+                        audio_data = audio_data.encode('utf-8')
+                        
                     # 将二进制音频数据转换为Base64编码的字符串
-                    audio_base64 = base64.b64encode(synthesis_result.audio_data).decode('utf-8')
+                    audio_base64 = base64.b64encode(audio_data).decode('utf-8')
                     
                     # 发送最后一段音频
                     yield json.dumps({
