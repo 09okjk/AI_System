@@ -149,10 +149,10 @@ async def voice_chat(
             response_audio=synthesis_result.audio_data,
             audio_format=synthesis_result.format,
             session_id=session_id or request_id,
-            model_used=chat_response.model_name,
+            model_used=chat_response["model_name"],
             processing_time={
                 "recognition": recognition_result.processing_time,
-                "llm_chat": chat_response.processing_time,
+                "llm_chat": chat_response["processing_time"],
                 "synthesis": synthesis_result.processing_time
             }
         )
