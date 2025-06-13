@@ -2,7 +2,8 @@
 语音处理相关接口模块
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, StreamingResponse
+from fastapi import APIRouter, HTTPException, UploadFile, File
+from starlette.responses import StreamingResponse
 from typing import Optional
 from src.models import (
     SpeechRecognitionResponse, SpeechSynthesisResponse, 
