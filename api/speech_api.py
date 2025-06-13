@@ -2,13 +2,16 @@
 语音处理相关接口模块
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, UploadFile, File, StreamingResponse
 from typing import Optional
 from src.models import (
     SpeechRecognitionResponse, SpeechSynthesisResponse, 
     SpeechSynthesisRequest, VoiceChatResponse
 )
 from src.utils import generate_response_id
+import json
+import time
+import base64
 
 router = APIRouter()
 
@@ -35,7 +38,7 @@ async def recognize_speech(
     logger = managers['logger']
     
     request_id = generate_response_id()
-    logger.info(f"🎤 开始语音识别 [请求ID: {request_id}] - 文件: {audio_file.filename}")
+    logger.info(f"开始语音识别 [请求ID: {request_id}] - 文件: {audio_file.filename}")
     
     try:
         # 验证文件类型
@@ -44,7 +47,7 @@ async def recognize_speech(
         
         # 读取音频数据
         audio_data = await audio_file.read()
-        logger.info(f"📁 音频文件读取完成 [请求ID: {request_id}] - 大小: {len(audio_data)} bytes")
+        logger.info(f"音频文件读取完成 [请求ID: {request_id}] - 大小: {len(audio_data)} bytes")
         
         # 执行语音识别
         result = await managers['speech_processor'].recognize(
@@ -54,13 +57,13 @@ async def recognize_speech(
             request_id=request_id
         )
         
-        logger.info(f"✅ 语音识别完成 [请求ID: {request_id}] - 文本长度: {len(result.text)}")
+        logger.info(f"语音识别完成 [请求ID: {request_id}] - 文本长度: {len(result.text)}")
         return result
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ 语音识别失败 [请求ID: {request_id}]: {str(e)}")
+        logger.error(f"语音识别失败 [请求ID: {request_id}]: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/api/speech/synthesize", response_model=SpeechSynthesisResponse)
@@ -70,7 +73,7 @@ async def synthesize_speech(request: SpeechSynthesisRequest):
     logger = managers['logger']
     
     request_id = generate_response_id()
-    logger.info(f"🔊 开始语音合成 [请求ID: {request_id}] - 文本长度: {len(request.text)}")
+    logger.info(f"开始语音合成 [请求ID: {request_id}] - 文本长度: {len(request.text)}")
     
     try:
         # 执行语音合成
@@ -84,11 +87,11 @@ async def synthesize_speech(request: SpeechSynthesisRequest):
             request_id=request_id
         )
         
-        logger.info(f"✅ 语音合成完成 [请求ID: {request_id}] - 音频大小: {len(result.audio_data)} bytes")
+        logger.info(f"语音合成完成 [请求ID: {request_id}] - 音频大小: {len(result.audio_data)} bytes")
         return result
         
     except Exception as e:
-        logger.error(f"❌ 语音合成失败 [请求ID: {request_id}]: {str(e)}")
+        logger.error(f"语音合成失败 [请求ID: {request_id}]: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/api/chat/voice", response_model=VoiceChatResponse)
@@ -103,12 +106,12 @@ async def voice_chat(
     logger = managers['logger']
     
     request_id = generate_response_id()
-    logger.info(f"💬 开始语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
+    logger.info(f"开始语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
     
     try:
         # 1. 语音识别
         audio_data = await audio_file.read()
-        logger.info(f"🎤 执行语音识别 [请求ID: {request_id}]")
+        logger.info(f"执行语音识别 [请求ID: {request_id}]")
         
         recognition_result = await managers['speech_processor'].recognize(
             audio_data=audio_data,
@@ -116,10 +119,10 @@ async def voice_chat(
         )
         
         user_text = recognition_result.text
-        logger.info(f"🔤 识别结果 [请求ID: {request_id}]: {user_text}")
+        logger.info(f"识别结果 [请求ID: {request_id}]: {user_text}")
         
         # 2. LLM 对话
-        logger.info(f"🤖 调用 LLM 模型 [请求ID: {request_id}]")
+        logger.info(f"调用 LLM 模型 [请求ID: {request_id}]")
         
         chat_response = await managers['llm_manager'].chat(
             model_name=llm_model,
@@ -130,17 +133,17 @@ async def voice_chat(
         )
         
         response_text = chat_response["content"]
-        logger.info(f"💭 LLM 响应 [请求ID: {request_id}]: {response_text[:100]}...")
+        logger.info(f"LLM 响应 [请求ID: {request_id}]: {response_text[:100]}...")
         
         # 3. 语音合成
-        logger.info(f"🔊 执行语音合成 [请求ID: {request_id}]")
+        logger.info(f"执行语音合成 [请求ID: {request_id}]")
         
         synthesis_result = await managers['speech_processor'].synthesize(
             text=response_text,
             request_id=request_id
         )
         
-        logger.info(f"✅ 语音对话完成 [请求ID: {request_id}]")
+        logger.info(f"语音对话完成 [请求ID: {request_id}]")
         
         return VoiceChatResponse(
             request_id=request_id,
@@ -158,5 +161,181 @@ async def voice_chat(
         )
         
     except Exception as e:
-        logger.error(f"❌ 语音对话失败 [请求ID: {request_id}]: {str(e)}")
+        logger.error(f"语音对话失败 [请求ID: {request_id}]: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/api/chat/voice/stream")
+async def voice_chat_stream(
+    audio_file: UploadFile = File(...),
+    llm_model: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    session_id: Optional[str] = None
+):
+    """流式语音对话接口（语音输入 + 流式文本和语音输出）"""
+    managers = get_managers()
+    logger = managers['logger']
+    
+    request_id = generate_response_id()
+    logger.info(f"开始流式语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
+    
+    # 为流式响应创建生成器函数
+    async def stream_generator():
+        try:
+            # 1. 语音识别
+            audio_data = await audio_file.read()
+            logger.info(f"执行语音识别 [请求ID: {request_id}]")
+            
+            recognition_result = await managers['speech_processor'].recognize(
+                audio_data=audio_data,
+                request_id=request_id
+            )
+            
+            user_text = recognition_result.text
+            logger.info(f"识别结果 [请求ID: {request_id}]: {user_text}")
+            
+            # 发送识别结果
+            yield json.dumps({
+                "type": "recognition",
+                "request_id": request_id,
+                "text": user_text
+            }) + "\n"
+            
+            # 2. LLM 流式对话
+            logger.info(f"开始 LLM 流式对话 [请求ID: {request_id}]")
+            
+            # 文本缓冲区，用于分段处理
+            text_buffer = ""
+            # 文本分段的最小长度（中文约30-50字为宜）
+            min_segment_length = 40
+            # 定义分段标记（可以是标点符号或自然段落）
+            segment_markers = ["。", "！", "？", "；", ".", "!", "?", ";", "\n"]
+            
+            # 调用流式LLM对话
+            start_time = time.time()
+            async for chunk in managers['llm_manager'].stream_chat(
+                model_name=llm_model,
+                message=user_text,
+                system_prompt=system_prompt,
+                session_id=session_id,
+                request_id=request_id
+            ):
+                # 获取文本块
+                if isinstance(chunk, dict):
+                    text_chunk = chunk.get("content", "")
+                else:
+                    text_chunk = chunk
+                    
+                if not text_chunk:
+                    continue
+                
+                # 累积到缓冲区
+                text_buffer += text_chunk
+                
+                # 检查是否可以分段处理
+                should_process = False
+                process_index = len(text_buffer)
+                
+                # 如果文本长度超过最小分段长度，检查是否有合适的分段点
+                if len(text_buffer) >= min_segment_length:
+                    for marker in segment_markers:
+                        last_marker = text_buffer.rfind(marker)
+                        if last_marker > 0:  # 找到标记
+                            process_index = last_marker + len(marker)
+                            should_process = True
+                            break
+                
+                # 如果找到分段点，处理此段
+                if should_process:
+                    segment_text = text_buffer[:process_index]
+                    text_buffer = text_buffer[process_index:]
+                    
+                    # 发送文本分段
+                    yield json.dumps({
+                        "type": "text",
+                        "segment_id": f"{request_id}_{int(time.time())}",
+                        "text": segment_text
+                    }) + "\n"
+                    
+                    # 3. 生成此段的语音
+                    logger.info(f"为分段文本合成语音 [长度: {len(segment_text)}]")
+                    
+                    try:
+                        synthesis_result = await managers['speech_processor'].synthesize(
+                            text=segment_text,
+                            request_id=f"{request_id}_seg_{int(time.time())}"
+                        )
+                        
+                        # 将二进制音频数据转换为Base64编码的字符串
+                        audio_base64 = base64.b64encode(synthesis_result.audio_data).decode('utf-8')
+                        
+                        # 发送音频段
+                        yield json.dumps({
+                            "type": "audio",
+                            "segment_id": f"{request_id}_{int(time.time())}",
+                            "text": segment_text,
+                            "audio": audio_base64,
+                            "format": synthesis_result.format
+                        }) + "\n"
+                    except Exception as e:
+                        logger.error(f"音频合成失败: {str(e)}")
+                        yield json.dumps({
+                            "type": "error",
+                            "message": f"音频合成失败: {str(e)}"
+                        }) + "\n"
+            
+            # 处理剩余的文本缓冲区
+            if text_buffer:
+                # 发送最后一段文本
+                yield json.dumps({
+                    "type": "text",
+                    "segment_id": f"{request_id}_final",
+                    "text": text_buffer
+                }) + "\n"
+                
+                # 为最后一段文本合成语音
+                try:
+                    synthesis_result = await managers['speech_processor'].synthesize(
+                        text=text_buffer,
+                        request_id=f"{request_id}_final"
+                    )
+                    
+                    # 将二进制音频数据转换为Base64编码的字符串
+                    audio_base64 = base64.b64encode(synthesis_result.audio_data).decode('utf-8')
+                    
+                    # 发送最后一段音频
+                    yield json.dumps({
+                        "type": "audio",
+                        "segment_id": f"{request_id}_final",
+                        "text": text_buffer,
+                        "audio": audio_base64,
+                        "format": synthesis_result.format
+                    }) + "\n"
+                except Exception as e:
+                    logger.error(f"最终音频合成失败: {str(e)}")
+                    yield json.dumps({
+                        "type": "error",
+                        "message": f"最终音频合成失败: {str(e)}"
+                    }) + "\n"
+            
+            # 发送完成信号
+            processing_time = time.time() - start_time
+            yield json.dumps({
+                "type": "done",
+                "request_id": request_id,
+                "processing_time": processing_time
+            }) + "\n"
+            
+            logger.info(f"流式语音对话完成 [请求ID: {request_id}] - 总时长: {processing_time:.2f}s")
+            
+        except Exception as e:
+            logger.error(f"流式语音对话失败 [请求ID: {request_id}]: {str(e)}")
+            yield json.dumps({
+                "type": "error",
+                "message": str(e)
+            }) + "\n"
+    
+    # 返回流式响应
+    return StreamingResponse(
+        stream_generator(),
+        media_type="application/x-ndjson"
+    )
