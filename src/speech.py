@@ -566,7 +566,7 @@ class MockSynthesizer(SpeechSynthesizer):
                        voice: Optional[str] = None,
                        language: str = "zh-CN",
                        speed: float = 1.0,
-                       pitch: float = 1.0,
+                       pitch: float = 1.3,
                        **kwargs) -> Dict[str, Any]:
         """模拟语音合成"""
         logger.info(f"🔊 开始模拟语音合成 - 文本长度: {len(text)}")
