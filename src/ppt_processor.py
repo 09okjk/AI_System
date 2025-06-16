@@ -13,6 +13,8 @@ from pptx import Presentation
 from pdf2image import convert_from_path
 import time
 import uuid
+import subprocess
+import platform
 from openai import OpenAI
 
 from .models import DataDocumentCreate, DataItemContent
@@ -117,9 +119,9 @@ class PPTProcessor:
         
         try:
             if file_ext == '.pptx' or file_ext == '.ppt':
-                # 先将PPT转换为PDF（可以使用其他方法）
+                # 先将PPT转换为PDF
                 pdf_path = ppt_path + '.pdf'
-                self._convert_ppt_to_pdf(ppt_path, pdf_path)
+                await self._convert_ppt_to_pdf(ppt_path, pdf_path)
                 
                 # 将PDF转换为图片
                 pdf_images = convert_from_path(pdf_path, dpi=200)
@@ -135,7 +137,8 @@ class PPTProcessor:
                     images.append(img_base64)
                 
                 # 删除临时PDF文件
-                os.remove(pdf_path)
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
             else:
                 raise ValueError(f"不支持的文件格式: {file_ext}")
                 
@@ -145,27 +148,86 @@ class PPTProcessor:
             self.logger.error(f"PPT转换为图片失败: {e}")
             raise
     
-    def _convert_ppt_to_pdf(self, ppt_path: str, pdf_path: str):
+    async def _convert_ppt_to_pdf(self, ppt_path: str, pdf_path: str):
         """
-        将PPT转换为PDF（需要系统安装LibreOffice或unoconv）
+        将PPT转换为PDF（适用于Ubuntu系统）
         
         Args:
             ppt_path: PPT文件路径
             pdf_path: 输出PDF路径
         """
         try:
-            # 使用unoconv或其他工具（这里需要系统安装该工具）
-            import subprocess
-            subprocess.call(['unoconv', '-f', 'pdf', '-o', pdf_path, ppt_path])
-        except Exception:
-            # 备用方案：使用comtypes(仅限Windows且需要安装Microsoft PowerPoint)
-            import comtypes.client
-            powerpoint = comtypes.client.CreateObject("Powerpoint.Application")
-            powerpoint.Visible = True
-            slides = powerpoint.Presentations.Open(ppt_path)
-            slides.SaveAs(pdf_path, 32)  # 32 表示PDF格式
-            slides.Close()
-            powerpoint.Quit()
+            # 方法1：使用LibreOffice (推荐)
+            self.logger.info("尝试使用LibreOffice转换PPT...")
+            result = subprocess.run([
+                'libreoffice', 
+                '--headless', 
+                '--convert-to', 'pdf',
+                '--outdir', os.path.dirname(pdf_path),
+                ppt_path
+            ], capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0:
+                # LibreOffice 会创建一个与原文件同名但扩展名为.pdf的文件
+                original_pdf = os.path.join(os.path.dirname(pdf_path), 
+                                          os.path.splitext(os.path.basename(ppt_path))[0] + '.pdf')
+                if os.path.exists(original_pdf):
+                    shutil.move(original_pdf, pdf_path)
+                    self.logger.info("✅ 使用LibreOffice转换成功")
+                    return
+            
+            self.logger.warning(f"LibreOffice转换失败: {result.stderr}")
+            
+        except subprocess.TimeoutExpired:
+            self.logger.error("LibreOffice转换超时")
+        except FileNotFoundError:
+            self.logger.warning("LibreOffice未安装，尝试其他方法...")
+        except Exception as e:
+            self.logger.warning(f"LibreOffice转换出错: {e}")
+        
+        try:
+            # 方法2：使用unoconv
+            self.logger.info("尝试使用unoconv转换PPT...")
+            result = subprocess.run([
+                'unoconv', '-f', 'pdf', '-o', pdf_path, ppt_path
+            ], capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0 and os.path.exists(pdf_path):
+                self.logger.info("✅ 使用unoconv转换成功")
+                return
+            
+            self.logger.warning(f"unoconv转换失败: {result.stderr}")
+            
+        except subprocess.TimeoutExpired:
+            self.logger.error("unoconv转换超时")
+        except FileNotFoundError:
+            self.logger.warning("unoconv未安装")
+        except Exception as e:
+            self.logger.warning(f"unoconv转换出错: {e}")
+        
+        # 如果是Windows系统，尝试使用COM (仅作为最后的备用方案)
+        if platform.system() == "Windows":
+            try:
+                self.logger.info("Windows系统，尝试使用COM转换...")
+                import comtypes.client
+                powerpoint = comtypes.client.CreateObject("Powerpoint.Application")
+                powerpoint.Visible = False
+                slides = powerpoint.Presentations.Open(ppt_path)
+                slides.SaveAs(pdf_path, 32)  # 32 表示PDF格式
+                slides.Close()
+                powerpoint.Quit()
+                self.logger.info("✅ 使用COM转换成功")
+                return
+            except Exception as e:
+                self.logger.warning(f"COM转换失败: {e}")
+        
+        # 所有方法都失败
+        raise RuntimeError(
+            "PPT转PDF失败。请确保系统已安装以下工具之一：\n"
+            "1. LibreOffice: sudo apt install libreoffice\n"
+            "2. unoconv: sudo apt install unoconv\n"
+            "或者检查PPT文件是否损坏。"
+        )
     
     async def _analyze_image(self, image_base64: str, prompt: str) -> str:
         """
@@ -206,7 +268,7 @@ class PPTProcessor:
             ppt_processor = PPTProcessor()
             ppt_status = {"healthy": True}
     
-            # 可选：检查关键依赖
+            # 检查关键依赖
             import importlib
             dependencies = ["pptx", "pdf2image"]
             missing = []
@@ -216,9 +278,31 @@ class PPTProcessor:
                 except ImportError:
                     missing.append(dep)
     
+            # 检查系统转换工具
+            conversion_tools = []
+            try:
+                subprocess.run(['libreoffice', '--version'], 
+                             capture_output=True, check=True)
+                conversion_tools.append("LibreOffice")
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                pass
+            
+            try:
+                subprocess.run(['unoconv', '--version'], 
+                             capture_output=True, check=True)
+                conversion_tools.append("unoconv")
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                pass
+    
+            if not conversion_tools:
+                ppt_status["healthy"] = False
+                ppt_status["message"] = "未找到PPT转换工具 (LibreOffice/unoconv)"
+            else:
+                ppt_status["conversion_tools"] = conversion_tools
+    
             if missing:
                 ppt_status["healthy"] = False
-                ppt_status["message"] = f"缺少依赖: {', '.join(missing)}"
+                ppt_status["message"] = f"缺少Python依赖: {', '.join(missing)}"
     
             health_status["ppt_processor"] = ppt_status
         except Exception as e:
@@ -234,6 +318,32 @@ class PPTProcessor:
             # 检查必要依赖
             import pptx
             import pdf2image
+            
+            # 检查系统转换工具
+            tools_available = []
+            try:
+                subprocess.run(['libreoffice', '--version'], 
+                             capture_output=True, check=True, timeout=10)
+                tools_available.append("LibreOffice")
+            except:
+                pass
+            
+            try:
+                subprocess.run(['unoconv', '--version'], 
+                             capture_output=True, check=True, timeout=10)
+                tools_available.append("unoconv")
+            except:
+                pass
+            
+            if not tools_available:
+                self.logger.warning("⚠️ 未检测到PPT转换工具，请安装LibreOffice或unoconv")
+                self.logger.info("安装命令:")
+                self.logger.info("  sudo apt update")
+                self.logger.info("  sudo apt install libreoffice")
+                self.logger.info("  # 或者")
+                self.logger.info("  sudo apt install unoconv")
+            else:
+                self.logger.info(f"✅ 检测到转换工具: {', '.join(tools_available)}")
             
             # 检查模型连接
             if self.client:
