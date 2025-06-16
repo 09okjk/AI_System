@@ -312,11 +312,13 @@ async def upload_image(image: UploadFile = File(...)):
 # ==================== PPT上传接口 ====================
 from fastapi.background import BackgroundTasks
 
+# ==================== PPT上传接口 ====================
+
 @router.post("/api/data/ppt-import")
 async def import_ppt_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    prompt: str = Form("请详细描述这个PPT幻灯片的内容"),
-    background_tasks: BackgroundTasks = None,
+    prompt: str = Form(None)  # 允许用户自定义提示词
 ):
     """导入PPT文件并转换为数据文档"""
     managers = get_managers()
@@ -327,19 +329,30 @@ async def import_ppt_document(
     
     try:
         # 检查文件类型
-        if not file.filename.endswith(('.ppt', '.pptx')):
+        if not file.filename.lower().endswith(('.ppt', '.pptx')):
             raise HTTPException(status_code=400, detail="只支持PPT和PPTX格式的文件")
             
         # 读取文件内容
         file_content = await file.read()
         
-        # 限制文件大小 (20MB)
-        if len(file_content) > 20 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="文件大小不能超过20MB")
+        # 限制文件大小 (50MB，因为需要处理图像)
+        if len(file_content) > 50 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="文件大小不能超过50MB")
         
         # 导入PPT处理器
         from src.ppt_processor import PPTProcessor
         ppt_processor = PPTProcessor()
+        
+        # 初始化处理器
+        init_success = await ppt_processor.initialize()
+        if not init_success:
+            raise HTTPException(status_code=500, detail="PPT处理器初始化失败")
+        
+        # 使用用户提供的prompt，如果没提供则使用默认的
+        if not prompt:
+            prompt = ppt_processor.prompt_template
+        
+        logger.info(f"开始处理PPT文件，使用提示词: {prompt[:50]}...")
         
         # 处理PPT文件
         document = await ppt_processor.process_ppt(
@@ -351,27 +364,18 @@ async def import_ppt_document(
         # 创建数据文档
         result = await managers['mongodb_manager'].create_document(document)
         
-        logger.info(f"✅ PPT导入成功 [请求ID: {request_id}] - ID: {result.id}")
+        logger.info(f"✅ PPT导入成功 [请求ID: {request_id}] - ID: {result.id}, 幻灯片数: {len(document.data_list)}")
         
-        # 创建任务ID
-        task_id = str(uuid.uuid4())
-        
-        # 添加后台任务
-        background_tasks.add_task(
-            process_ppt_background, 
-            task_id, 
-            file_content, 
-            file.filename, 
-            prompt, 
-            managers
-        )
+        # 清理处理器资源
+        await ppt_processor.cleanup()
         
         return {
             "success": True,
             "message": "PPT导入成功并转换为数据文档",
             "document_id": result.id,
             "document_name": result.name,
-            "slides_count": len(document.data_list)
+            "slides_count": len(document.data_list),
+            "processing_method": "ai_image_analysis"
         }
             
     except ValueError as e:
@@ -381,4 +385,21 @@ async def import_ppt_document(
         raise
     except Exception as e:
         logger.error(f"❌ PPT导入异常 [请求ID: {request_id}]: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"PPT导入处理失败: {str(e)}")
+
+# 添加PPT处理器健康检查接口
+@router.get("/api/data/ppt-processor/health")
+async def check_ppt_processor_health():
+    """检查PPT处理器健康状态"""
+    try:
+        from src.ppt_processor import PPTProcessor
+        ppt_processor = PPTProcessor()
+        health_status = await ppt_processor.health_check()
+        return health_status
+    except Exception as e:
+        return {
+            "ppt_processor": {
+                "healthy": False,
+                "message": f"健康检查失败: {str(e)}"
+            }
+        }
