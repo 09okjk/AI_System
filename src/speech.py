@@ -58,6 +58,133 @@ def convert_audio_to_wav(input_path: str, output_path: Optional[str] = None, sam
         logger.error(f"音频格式转换失败: {str(e)}")
         raise
 
+def split_text_for_synthesis(text: str, max_segment_length: int = 200) -> List[str]:
+    """
+    将长文本分割成适合语音合成的段落
+    
+    Args:
+        text: 要分割的文本
+        max_segment_length: 每段最大字符数
+        
+    Returns:
+        分割后的文本段落列表
+    """
+    segments = []
+    # 分段标记（标点符号或自然段落）
+    segment_markers = ["。", "！", "？", "；", ".", "!", "?", ";", "\n"]
+    
+    # 如果文本较短，直接返回
+    if len(text) <= max_segment_length:
+        return [text]
+    
+    # 处理长文本
+    remaining_text = text
+    while remaining_text:
+        # 如果剩余文本小于最大长度，直接添加
+        if len(remaining_text) <= max_segment_length:
+            segments.append(remaining_text)
+            break
+            
+        # 尝试在标点符号处分段
+        found_marker = False
+        process_index = max_segment_length
+        
+        # 从最大长度向前查找分段点
+        for marker in segment_markers:
+            # 在合理范围内寻找最后出现的标记
+            last_marker = remaining_text.rfind(marker, 0, max_segment_length)
+            if last_marker > 0:  # 找到标记
+                process_index = last_marker + len(marker)
+                found_marker = True
+                break
+                
+        # 如果没找到合适的分段点，强制在最大长度处分段
+        if not found_marker:
+            # 避免在词语中间分段，尝试向前找空格或其他可分割点
+            fallback_markers = [" ", "，", ","]
+            for marker in fallback_markers:
+                last_marker = remaining_text.rfind(marker, max_segment_length - 50, max_segment_length)
+                if last_marker > 0:
+                    process_index = last_marker + len(marker)
+                    found_marker = True
+                    break
+                    
+            # 如果还是没找到，就在最大长度处硬分割
+            if not found_marker:
+                process_index = max_segment_length
+        
+        # 添加分段并更新剩余文本
+        segments.append(remaining_text[:process_index])
+        remaining_text = remaining_text[process_index:]
+        
+    return segments
+
+async def merge_audio_data(audio_segments: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    合并多个音频片段的数据
+    
+    Args:
+        audio_segments: 音频片段列表，每个片段是一个包含音频数据的字典
+        
+    Returns:
+        合并后的音频数据字典
+    """
+    if not audio_segments:
+        return {"audio_data": "", "format": AudioFormat.WAV, "duration": 0, "processing_time": 0}
+    
+    if len(audio_segments) == 1:
+        return audio_segments[0]
+    
+    try:
+        import io
+        import numpy as np
+        import soundfile as sf
+        from pydub import AudioSegment
+        
+        merged_audio = None
+        total_duration = 0
+        total_processing_time = 0
+        
+        # 处理所有音频片段
+        for segment in audio_segments:
+            # 解码Base64音频数据
+            audio_data = base64.b64decode(segment["audio_data"])
+            total_duration += segment.get("duration", 0)
+            total_processing_time += segment.get("processing_time", 0)
+            
+            # 创建音频片段
+            audio_segment = AudioSegment.from_file(io.BytesIO(audio_data), format="wav")
+            
+            # 合并音频
+            if merged_audio is None:
+                merged_audio = audio_segment
+            else:
+                merged_audio += audio_segment
+        
+        # 导出合并后的音频
+        buffer = io.BytesIO()
+        merged_audio.export(buffer, format="wav")
+        buffer.seek(0)
+        
+        # 编码为Base64
+        merged_audio_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        
+        # 返回合并后的结果
+        return {
+            "audio_data": merged_audio_base64,
+            "format": AudioFormat.WAV,
+            "duration": total_duration,
+            "processing_time": total_processing_time,
+            "model_used": audio_segments[0].get("model_used", "combined"),
+            "synthesis_mode": audio_segments[0].get("synthesis_mode", "default"),
+            "sample_rate": audio_segments[0].get("sample_rate", 16000)
+        }
+        
+    except Exception as e:
+        logger.error(f"合并音频失败: {str(e)}")
+        # 如果合并失败，返回第一个片段
+        return audio_segments[0]
+
 class SpeechRecognizer:
     """语音识别器基类"""    
     def __init__(self, config: Dict[str, Any]):
@@ -336,74 +463,85 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             raise
     
     async def synthesize(self, 
-                        text: str, 
-                        voice: Optional[str] = None,
-                        language: str = "zh-CN",
-                        speed: float = 1.0,
-                        pitch: float = 1.0,
-                        synthesis_mode: str = "instruct",
-                        **kwargs) -> Dict[str, Any]:
-        """CosyVoice 语音合成 - 支持多种合成模式"""
-        start_time = time.time()
+                    text: str,
+                    voice: Optional[str] = None,
+                    language: str = "zh-CN",
+                    speed: float = 1.0,
+                    pitch: float = 1.0,
+                    tts_model: Optional[str] = None,
+                    request_id: Optional[str] = None,
+                    max_segment_length: int = 200,  # 添加参数控制分段长度
+                    **kwargs) -> SpeechSynthesisResponse:
+        """语音合成 - 优化版，支持长文本分段处理"""
+        if not self.is_initialized:
+            raise RuntimeError("语音处理器未初始化")
+        
+        # 强制使用CosyVoice合成器，忽略其他设置
+        synthesizer_name = 'cosyvoice'
+        if synthesizer_name not in self.synthesizers:
+            raise ValueError(f"CosyVoice语音合成器不可用，请确保CosyVoice2-0.5b模型已安装")
+        
+        synthesizer = self.synthesizers[synthesizer_name]
         
         try:
-            if self.model is None:
-                # 模拟合成结果
-                await asyncio.sleep(1.5)
-                
-                processing_time = time.time() - start_time
-                
-                # 创建模拟音频数据（静音）
-                sample_rate = 22050
-                duration = max(len(text) / 10, 1.0)  # 基于文本长度估算时长
-                audio_samples = int(sample_rate * duration)
-                mock_audio = b'\x00' * (audio_samples * 2)  # 16位PCM
-                
-                audio_base64 = base64.b64encode(mock_audio).decode('utf-8')
-                
-                return {
-                    "audio_data": audio_base64,
-                    "format": AudioFormat.WAV,
-                    "duration": duration,
-                    "processing_time": processing_time,
-                    "model_used": "mock_cosyvoice",
-                    "synthesis_mode": synthesis_mode
-                }
+            logger.info(f"🔊 开始语音合成 - 模型: {synthesizer_name}, 文本长度: {len(text)}")
             
-            # 根据合成模式选择不同的方法
-            if synthesis_mode == "zero_shot":
-                result = await self._zero_shot_synthesis(text, kwargs)
-            elif synthesis_mode == "cross_lingual":
-                result = await self._cross_lingual_synthesis(text, kwargs)
-            elif synthesis_mode == "instruct":
-                result = await self._instruct_synthesis(text, kwargs)
+            # 长文本分段处理
+            if len(text) > max_segment_length:
+                logger.info(f"文本长度 ({len(text)}) 超过限制 ({max_segment_length})，进行分段处理")
+                text_segments = split_text_for_synthesis(text, max_segment_length)
+                logger.info(f"文本已分割为 {len(text_segments)} 个段落")
+                
+                # 合成每个段落
+                audio_segments = []
+                for i, segment in enumerate(text_segments):
+                    logger.info(f"合成段落 {i+1}/{len(text_segments)}, 长度: {len(segment)}")
+                    
+                    segment_result = await synthesizer.synthesize(
+                        text=segment,
+                        voice=voice,
+                        language=language,
+                        speed=speed,
+                        pitch=pitch,
+                        **kwargs
+                    )
+                    
+                    audio_segments.append(segment_result)
+                
+                # 合并音频
+                logger.info(f"合并 {len(audio_segments)} 个音频片段")
+                result = await merge_audio_data(audio_segments)
+                logger.info(f"音频合并完成，总时长: {result['duration']:.2f}s")
+                
             else:
-                # 默认使用零样本合成
-                result = await self._zero_shot_synthesis(text, kwargs)
+                # 文本长度在限制范围内，直接合成
+                result = await synthesizer.synthesize(
+                    text=text,
+                    voice=voice,
+                    language=language,
+                    speed=speed,
+                    pitch=pitch,
+                    **kwargs
+                )
+                
+                logger.info(f"✅ 语音合成完成 - 音频时长: {result['duration']:.2f}s")
             
-            processing_time = time.time() - start_time
-            result["processing_time"] = processing_time
-            result["synthesis_mode"] = synthesis_mode
-            
-            log_speech_operation(
-                logger, "synthesis", "cosyvoice", 
-                len(text), len(result["audio_data"]), processing_time, 
-                True, language
+            return SpeechSynthesisResponse(
+                success=True,
+                audio_data=result["audio_data"],
+                format=result["format"],
+                duration=result["duration"],
+                processing_time=result["processing_time"],
+                model_used=result["model_used"],
+                request_id=request_id or generate_response_id(),
+                timestamp=datetime.utcnow(),
+                synthesis_mode=result.get("synthesis_mode", "default"),
+                sample_rate=result.get("sample_rate", 16000)
             )
-            
-            return result
             
         except Exception as e:
-            processing_time = time.time() - start_time
-            error_msg = str(e)
-            
-            log_speech_operation(
-                logger, "synthesis", "cosyvoice", 
-                len(text), 0, processing_time, 
-                False, language, error_msg
-            )
-            
-            raise Exception(f"CosyVoice 合成失败: {error_msg}")
+            logger.error(f"❌ 语音合成失败: {str(e)}")
+            raise
     
     async def _zero_shot_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """零样本语音合成"""
