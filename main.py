@@ -27,6 +27,7 @@ def get_managers():
         from src.speech import SpeechProcessor
         from src.mongodb_manager import MongoDBManager
         from src.logger import setup_logger, get_logger
+        from src.ppt_processor import PPTProcessor
         
         return {
             'ConfigManager': ConfigManager,
@@ -36,6 +37,7 @@ def get_managers():
             'MongoDBManager': MongoDBManager,
             'setup_logger': setup_logger,
             'get_logger': get_logger,
+            'PPTProcessor': PPTProcessor
         }
     except ImportError as e:
         # 如果导入失败，返回一个包含错误信息的字典
@@ -66,6 +68,7 @@ mcp_manager = None
 llm_manager = None
 speech_processor = None
 mongodb_manager = None
+ppt_processor = None
 logger = None
 
 # 提前注册路由（确保 start_server.py 能够检测到）
@@ -102,6 +105,7 @@ async def startup_event():
         llm_manager = managers['LLMManager']()
         speech_processor = managers['SpeechProcessor']()
         mongodb_manager = managers['MongoDBManager']()
+        ppt_processor = managers['PPTProcessor']()
         
         # 依次初始化
         await config_manager.initialize()
@@ -118,6 +122,9 @@ async def startup_event():
         
         await mongodb_manager.initialize()
         logger.info("✅ MongoDB 管理器初始化完成")
+
+        await ppt_processor.initialize()
+        logger.info("✅ PPT处理器初始化完成")
         
         # 如果路由还没有注册，再次尝试注册
         if not hasattr(app, '_routes_registered'):
@@ -153,6 +160,8 @@ async def shutdown_event():
             await mcp_manager.cleanup()
         if config_manager:
             await config_manager.cleanup()
+        if ppt_processor:
+            await ppt_processor.cleanup()
         
         if logger:
             logger.info("✅ AI Agent Backend 已安全关闭")

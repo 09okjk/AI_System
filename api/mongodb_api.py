@@ -308,3 +308,77 @@ async def upload_image(image: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"❌ 图片上传异常 [请求ID: {request_id}]: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== PPT上传接口 ====================
+from fastapi.background import BackgroundTasks
+
+@router.post("/api/data/ppt-import")
+async def import_ppt_document(
+    file: UploadFile = File(...),
+    prompt: str = Form("请详细描述这个PPT幻灯片的内容"),
+    background_tasks: BackgroundTasks = None,
+):
+    """导入PPT文件并转换为数据文档"""
+    managers = get_managers()
+    logger = managers['logger']
+    
+    request_id = generate_response_id()
+    logger.info(f"📊 导入PPT文件 [请求ID: {request_id}] - 文件: {file.filename}")
+    
+    try:
+        # 检查文件类型
+        if not file.filename.endswith(('.ppt', '.pptx')):
+            raise HTTPException(status_code=400, detail="只支持PPT和PPTX格式的文件")
+            
+        # 读取文件内容
+        file_content = await file.read()
+        
+        # 限制文件大小 (20MB)
+        if len(file_content) > 20 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="文件大小不能超过20MB")
+        
+        # 导入PPT处理器
+        from src.ppt_processor import PPTProcessor
+        ppt_processor = PPTProcessor()
+        
+        # 处理PPT文件
+        document = await ppt_processor.process_ppt(
+            file_content, 
+            file.filename,
+            prompt
+        )
+        
+        # 创建数据文档
+        result = await managers['mongodb_manager'].create_document(document)
+        
+        logger.info(f"✅ PPT导入成功 [请求ID: {request_id}] - ID: {result.id}")
+        
+        # 创建任务ID
+        task_id = str(uuid.uuid4())
+        
+        # 添加后台任务
+        background_tasks.add_task(
+            process_ppt_background, 
+            task_id, 
+            file_content, 
+            file.filename, 
+            prompt, 
+            managers
+        )
+        
+        return {
+            "success": True,
+            "message": "PPT导入成功并转换为数据文档",
+            "document_id": result.id,
+            "document_name": result.name,
+            "slides_count": len(document.data_list)
+        }
+            
+    except ValueError as e:
+        logger.error(f"❌ PPT导入失败 [请求ID: {request_id}]: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ PPT导入异常 [请求ID: {request_id}]: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

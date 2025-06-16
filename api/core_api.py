@@ -19,13 +19,14 @@ router = APIRouter()
 # 全局变量引用（从 main.py 导入）
 def get_managers():
     """获取全局管理器实例"""
-    from main import config_manager, mcp_manager, llm_manager, speech_processor, logger
+    from main import config_manager, mcp_manager, llm_manager, speech_processor, logger, ppt_processor
     return {
         'config_manager': config_manager,
         'mcp_manager': mcp_manager,
         'llm_manager': llm_manager,
         'speech_processor': speech_processor,
-        'logger': logger
+        'logger': logger,
+        'ppt_processor': ppt_processor
     }
 
 # ==================== 系统状态接口 ====================
@@ -42,13 +43,14 @@ async def health_check():
     try:
         status = {
             "status": "healthy",
-            "timestamp": datetime.utcnow(),
+            "timestamp": datetime.now(datetime.timezone.utc),
             "version": "2.0.0",
             "components": {
                 "config_manager": await managers['config_manager'].health_check() if managers['config_manager'] else {"healthy": False},
                 "mcp_manager": await managers['mcp_manager'].health_check() if managers['mcp_manager'] else {"healthy": False},
                 "llm_manager": await managers['llm_manager'].health_check() if managers['llm_manager'] else {"healthy": False},
-                "speech_processor": await managers['speech_processor'].health_check() if managers['speech_processor'] else {"healthy": False}
+                "speech_processor": await managers['speech_processor'].health_check() if managers['speech_processor'] else {"healthy": False},
+                "ppt_processor": await managers['ppt_processor'].health_check() if managers['ppt_processor'] else {"healthy": False}
             }
         }
         
@@ -88,8 +90,8 @@ async def get_system_status():
         
         status = {
             "success": True,
-            "timestamp": datetime.utcnow(),
-            "uptime": datetime.utcnow(),  # 实际应用中应该记录启动时间
+            "timestamp": datetime.now(datetime.timezone.utc),
+            "uptime": datetime.now(datetime.timezone.utc),  # 实际应用中应该记录启动时间
             "mcp_tools": await managers['mcp_manager'].get_tools_status() if managers['mcp_manager'] else {},
             "llm_models": await managers['llm_manager'].get_models_status() if managers['llm_manager'] else {},
             "active_sessions": await get_active_sessions_count(),
