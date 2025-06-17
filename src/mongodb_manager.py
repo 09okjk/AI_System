@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorGridFSBucket
 from pymongo.errors import DuplicateKeyError, ConnectionFailure
 from bson import ObjectId
+from bson.errors import InvalidId
 import asyncio
 
 from .models import (
@@ -213,39 +214,104 @@ class MongoDBManager:
             if not document:
                 raise ValueError(f"未找到ID为 {document_id} 的数据文档")
             
+            self.logger.info(f"📄 开始处理文档 {document_id} 的图片数据，数据项数量: {len(document.get('data_list', []))}")
+            
             # 处理GridFS文件引用
-            for item in document["data_list"]:
+            for idx, item in enumerate(document["data_list"]):
                 if "image_file_id" in item and item["image_file_id"]:
+                    image_file_id = item["image_file_id"]
+                    self.logger.info(f"🖼️ 处理数据项 {idx} (sequence: {item.get('sequence', 'N/A')}) 的图片，GridFS ID: {image_file_id}")
+                    
                     try:
+                        # 验证ObjectId格式
+                        if not ObjectId.is_valid(image_file_id):
+                            self.logger.error(f"❌ 无效的ObjectId格式: {image_file_id}")
+                            item["image_load_error"] = f"无效的文件ID格式: {image_file_id}"
+                            continue
+                        
+                        file_object_id = ObjectId(image_file_id)
+                        
+                        # 检查文件是否存在
+                        try:
+                            file_info = await self.fs.find({"_id": file_object_id}).to_list(length=1)
+                            if not file_info:
+                                self.logger.error(f"❌ GridFS中未找到文件ID: {image_file_id}")
+                                item["image_load_error"] = f"文件不存在: {image_file_id}"
+                                continue
+                            
+                            file_metadata = file_info[0]
+                            self.logger.info(f"📁 找到GridFS文件: {file_metadata.get('filename', 'unknown')}, 大小: {file_metadata.get('length', 0)} bytes")
+                        except Exception as e:
+                            self.logger.error(f"❌ 检查GridFS文件存在性失败: {e}")
+                            item["image_load_error"] = f"文件检查失败: {str(e)}"
+                            continue
+                        
                         # 获取GridFS中的文件
-                        grid_out = await self.fs.open_download_stream(ObjectId(item["image_file_id"]))
+                        self.logger.debug(f"📥 开始下载GridFS文件: {image_file_id}")
+                        grid_out = await self.fs.open_download_stream(file_object_id)
                         
                         # 读取文件内容
                         chunks = []
+                        total_size = 0
                         async for chunk in grid_out:
                             chunks.append(chunk)
+                            total_size += len(chunk)
+                        
+                        if not chunks:
+                            self.logger.error(f"❌ GridFS文件为空: {image_file_id}")
+                            item["image_load_error"] = f"文件内容为空: {image_file_id}"
+                            continue
                         
                         # 转换为base64
                         image_data = b''.join(chunks)
-                        item["image"] = base64.b64encode(image_data).decode('utf-8')
+                        image_base64 = base64.b64encode(image_data).decode('utf-8')
+                        
+                        # 验证base64数据
+                        if len(image_base64) < 100:  # 太短可能不是有效图片
+                            self.logger.warning(f"⚠️ 图片base64数据可能无效，长度: {len(image_base64)}")
+                        
+                        item["image"] = image_base64
                         
                         # 如果没有mimetype，从metadata中获取
                         if not item.get("image_mimetype") and hasattr(grid_out, "metadata") and grid_out.metadata:
                             item["image_mimetype"] = grid_out.metadata.get("mimetype", "image/png")
+                        
+                        self.logger.info(f"✅ 成功加载图片 {image_file_id}, 原始大小: {total_size} bytes, Base64长度: {len(image_base64)}")
+                        
+                        # 清除错误信息（如果之前有的话）
+                        if "image_load_error" in item:
+                            del item["image_load_error"]
+                            
+                    except InvalidId as e:
+                        error_msg = f"无效的ObjectId: {image_file_id}"
+                        self.logger.error(f"❌ {error_msg}: {e}")
+                        item["image_load_error"] = error_msg
                     except Exception as e:
-                        self.logger.error(f"从GridFS获取图片失败: {e}")
-                        # 继续处理，但不包含图片
+                        error_msg = f"从GridFS获取图片失败: {str(e)}"
+                        self.logger.error(f"❌ 文件ID {image_file_id}: {error_msg}")
+                        item["image_load_error"] = error_msg
+                        
+                        # 添加详细的异常信息到日志
+                        import traceback
+                        self.logger.debug(f"详细错误信息:\n{traceback.format_exc()}")
+                else:
+                    # 没有image_file_id的情况
+                    if not item.get("image"):
+                        self.logger.debug(f"📝 数据项 {idx} (sequence: {item.get('sequence', 'N/A')}) 没有图片数据")
             
             # 转换为响应模型
             response_data = dict(document)
             response_data["id"] = str(response_data.pop("_id"))
             
+            self.logger.info(f"✅ 完成文档 {document_id} 的图片处理")
             return DataDocumentResponse(**response_data)
             
         except ValueError:
             raise
         except Exception as e:
             self.logger.error(f"❌ 获取数据文档失败: {e}")
+            import traceback
+            self.logger.debug(f"详细错误信息:\n{traceback.format_exc()}")
             raise
     
     async def update_document(self, document_id: str, update_data: DataDocumentUpdate) -> Optional[DataDocumentResponse]:
@@ -398,6 +464,17 @@ class MongoDBManager:
             async for doc in cursor:
                 response_data = dict(doc)
                 response_data["id"] = str(response_data.pop("_id"))
+                
+                # 列表查询时不加载图片内容，只保留元数据
+                for item in response_data.get("data_list", []):
+                    if "image_file_id" in item and item["image_file_id"]:
+                        # 保留图片元数据，但不加载实际图片内容
+                        item["has_image"] = True
+                        if not item.get("image"):
+                            item["image"] = None  # 确保为None而不是未定义
+                    else:
+                        item["has_image"] = False
+                
                 documents.append(DataDocumentResponse(**response_data))
             
             return DataDocumentListResponse(
@@ -432,6 +509,16 @@ class MongoDBManager:
                 response_data["id"] = str(response_data.pop("_id"))
                 # 移除score字段
                 response_data.pop("score", None)
+                
+                # 搜索结果也不加载图片内容
+                for item in response_data.get("data_list", []):
+                    if "image_file_id" in item and item["image_file_id"]:
+                        item["has_image"] = True
+                        if not item.get("image"):
+                            item["image"] = None
+                    else:
+                        item["has_image"] = False
+                
                 results.append(DataDocumentResponse(**response_data))
             
             search_time = (datetime.utcnow() - start_time).total_seconds()
@@ -452,7 +539,7 @@ class MongoDBManager:
         try:
             collection = self.db[self.collection_name]
             
-            # 聚合统计
+            # 聚合统计 - 更新统计逻辑以包含GridFS图片
             pipeline = [
                 {
                     "$group": {
@@ -464,7 +551,12 @@ class MongoDBManager:
                                 "$size": {
                                     "$filter": {
                                         "input": "$data_list",
-                                        "cond": {"$ne": ["$$this.image", None]}
+                                        "cond": {
+                                            "$or": [
+                                                {"$ne": ["$$this.image", None]},
+                                                {"$ne": ["$$this.image_file_id", None]}
+                                            ]
+                                        }
                                     }
                                 }
                             }
@@ -612,3 +704,54 @@ class MongoDBManager:
         except Exception as e:
             self.logger.error(f"❌ 删除数据项失败: {e}")
             raise
+    
+    # ==================== 新增调试方法 ====================
+    
+    async def debug_gridfs_file(self, file_id: str) -> Dict[str, Any]:
+        """调试GridFS文件信息"""
+        try:
+            if not ObjectId.is_valid(file_id):
+                return {"error": f"无效的ObjectId: {file_id}"}
+            
+            file_object_id = ObjectId(file_id)
+            
+            # 查找文件信息
+            file_info = await self.fs.find({"_id": file_object_id}).to_list(length=1)
+            
+            if not file_info:
+                return {"error": f"GridFS中未找到文件: {file_id}"}
+            
+            file_data = file_info[0]
+            
+            # 尝试读取文件内容
+            try:
+                grid_out = await self.fs.open_download_stream(file_object_id)
+                chunks = []
+                async for chunk in grid_out:
+                    chunks.append(chunk)
+                
+                content_size = sum(len(chunk) for chunk in chunks)
+                
+                return {
+                    "file_id": file_id,
+                    "filename": file_data.get("filename", "unknown"),
+                    "length": file_data.get("length", 0),
+                    "upload_date": file_data.get("uploadDate"),
+                    "metadata": file_data.get("metadata", {}),
+                    "content_readable": True,
+                    "actual_content_size": content_size,
+                    "chunks_count": len(chunks)
+                }
+            except Exception as e:
+                return {
+                    "file_id": file_id,
+                    "filename": file_data.get("filename", "unknown"),
+                    "length": file_data.get("length", 0),
+                    "upload_date": file_data.get("uploadDate"),
+                    "metadata": file_data.get("metadata", {}),
+                    "content_readable": False,
+                    "read_error": str(e)
+                }
+                
+        except Exception as e:
+            return {"error": f"调试GridFS文件失败: {str(e)}"}
