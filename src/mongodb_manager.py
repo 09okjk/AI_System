@@ -272,17 +272,31 @@ class MongoDBManager:
             if "data_list" in update_dict and update_dict["data_list"]:
                 modified_data_list = []
                 for idx, item in enumerate(update_dict["data_list"]):
-                    item_dict = item.dict()
+                    # 检查item是否为字典或Pydantic模型
+                    if hasattr(item, 'dict'):
+                        item_dict = item.dict()
+                    else:
+                        item_dict = item  # 如果已经是字典，则直接使用
                     
                     # 如果有图片数据，存储到GridFS
-                    if item.image:
+                    image_data = None
+                    image_field = item_dict.get("image") if isinstance(item_dict, dict) else getattr(item, "image", None)
+                    
+                    if image_field:
                         try:
                             # 解码base64
-                            image_data = base64.b64decode(item.image)
+                            image_data = base64.b64decode(image_field)
                             
                             # 生成文件名
                             doc_name = update_dict.get("name", existing["name"])
-                            filename = item.image_filename or f"image_{doc_name}_{idx}.png"
+                            
+                            # 获取文件名和序号
+                            image_filename = item_dict.get("image_filename", "") if isinstance(item_dict, dict) else getattr(item, "image_filename", "")
+                            sequence = item_dict.get("sequence", idx+1) if isinstance(item_dict, dict) else getattr(item, "sequence", idx+1)
+                            mimetype = item_dict.get("image_mimetype", "image/png") if isinstance(item_dict, dict) else getattr(item, "image_mimetype", "image/png")
+                            
+                            # 使用提供的文件名或生成一个
+                            filename = image_filename or f"image_{doc_name}_{idx}.png"
                             
                             # 上传到GridFS
                             file_id = await self.fs.upload_from_stream(
@@ -290,8 +304,8 @@ class MongoDBManager:
                                 io.BytesIO(image_data),
                                 metadata={
                                     "document_name": doc_name,
-                                    "sequence": item.sequence,
-                                    "mimetype": item.image_mimetype or "image/png"
+                                    "sequence": sequence,
+                                    "mimetype": mimetype
                                 }
                             )
                             
@@ -304,9 +318,9 @@ class MongoDBManager:
                             raise
                     
                     modified_data_list.append(item_dict)
-            
-            # 更新data_list字段
-            update_dict["data_list"] = modified_data_list
+                
+                # 更新data_list字段
+                update_dict["data_list"] = modified_data_list
         
             # 更新文档
             update_dict.update({
