@@ -268,6 +268,46 @@ class MongoDBManager:
                 if name_exists:
                     raise ValueError(f"数据文档名称 '{update_dict['name']}' 已存在")
             
+            # 处理图片数据，将大图片存储到GridFS
+            if "data_list" in update_dict and update_dict["data_list"]:
+                modified_data_list = []
+                for idx, item in enumerate(update_dict["data_list"]):
+                    item_dict = item.dict()
+                    
+                    # 如果有图片数据，存储到GridFS
+                    if item.image:
+                        try:
+                            # 解码base64
+                            image_data = base64.b64decode(item.image)
+                            
+                            # 生成文件名
+                            doc_name = update_dict.get("name", existing["name"])
+                            filename = item.image_filename or f"image_{doc_name}_{idx}.png"
+                            
+                            # 上传到GridFS
+                            file_id = await self.fs.upload_from_stream(
+                                filename,
+                                io.BytesIO(image_data),
+                                metadata={
+                                    "document_name": doc_name,
+                                    "sequence": item.sequence,
+                                    "mimetype": item.image_mimetype or "image/png"
+                                }
+                            )
+                            
+                            # 替换image字段为GridFS文件ID引用
+                            item_dict["image"] = None
+                            item_dict["image_file_id"] = str(file_id)
+                            self.logger.info(f"图片已存储到GridFS: {filename}, ID: {file_id}")
+                        except Exception as e:
+                            self.logger.error(f"存储图片到GridFS失败: {e}")
+                            raise
+                    
+                    modified_data_list.append(item_dict)
+            
+            # 更新data_list字段
+            update_dict["data_list"] = modified_data_list
+        
             # 更新文档
             update_dict.update({
                 "updated_at": datetime.utcnow(),
