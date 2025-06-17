@@ -23,7 +23,7 @@
       "models": {
         "cosyvoice": {
           "model_dir": "pretrained_models/CosyVoice2-0.5B",
-          "reference_audio": "assets/reference.wav",
+          "reference_audio": "assets/qandh-hukdz.wav",
           "reference_text": "参考音频文本"
         },
         "whisper": {
