@@ -496,7 +496,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             except Exception as e:
                 logger.error(f"参考音频转换失败: {str(e)}")
                 raise ValueError(f"参考音频格式转换失败: {str(e)}")
-        
+        logger.info(f"参考音频路径: {reference_audio_path}")        
         # 加载参考音频
         reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
         
