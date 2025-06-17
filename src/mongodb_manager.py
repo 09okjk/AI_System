@@ -272,9 +272,8 @@ class MongoDBManager:
                         
                         item["image"] = image_base64
                         
-                        # 如果没有mimetype，从metadata中获取
-                        if not item.get("image_mimetype") and hasattr(grid_out, "metadata") and grid_out.metadata:
-                            item["image_mimetype"] = grid_out.metadata.get("mimetype", "image/png")
+                        # 确保MIME类型始终为PNG
+                        item["image_mimetype"] = "image/png"
                         
                         self.logger.info(f"✅ 成功加载图片 {image_file_id}, 原始大小: {total_size} bytes, Base64长度: {len(image_base64)}")
                         
