@@ -18,7 +18,7 @@
       "default_asr_model": "sensvoice",
       "default_tts_model": "edge_tts",
       "supported_languages": ["zh-CN", "en-US", "ja-JP", "ko-KR"],
-      "max_audio_size": 10485760,
+      "max_audio_size": 20971520,
       "audio_formats": ["wav", "mp3", "flac", "m4a"],
       "models": {
         "cosyvoice": {
