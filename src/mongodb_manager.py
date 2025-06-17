@@ -43,9 +43,9 @@ class MongoDBManager:
                 connection_string = f"mongodb://{self.username}:{self.password}@{self.host}:{self.port}/{self.database_name}"
             else:
                 connection_string = f"mongodb://{self.host}:{self.port}"
-            
+        
             self.logger.info(f"🔌 连接 MongoDB: {self.host}:{self.port}")
-            
+        
             # 创建客户端
             self.client = AsyncIOMotorClient(
                 connection_string,
@@ -56,6 +56,9 @@ class MongoDBManager:
             
             # 选择数据库
             self.db = self.client[self.database_name]
+            
+            # 初始化GridFS
+            self.fs = AsyncIOMotorGridFSBucket(self.db)
             
             # 测试连接
             await self.client.admin.command('ping')
@@ -134,6 +137,44 @@ class MongoDBManager:
             
             # 准备文档数据
             doc_data = document.dict()
+            
+            # 处理图片数据，将大图片存储到GridFS
+            modified_data_list = []
+            for idx, item in enumerate(document.data_list):
+                item_dict = item.dict()
+                
+                # 如果有图片数据，存储到GridFS
+                if item.image:
+                    try:
+                        # 解码base64
+                        image_data = base64.b64decode(item.image)
+                        
+                        # 生成文件名
+                        filename = item.image_filename or f"image_{document.name}_{idx}.png"
+                        
+                        # 上传到GridFS
+                        file_id = await self.fs.upload_from_stream(
+                            filename,
+                            io.BytesIO(image_data),
+                            metadata={
+                                "document_name": document.name,
+                                "sequence": item.sequence,
+                                "mimetype": item.image_mimetype or "image/png"
+                            }
+                        )
+                        
+                        # 替换image字段为GridFS文件ID引用
+                        item_dict["image"] = None
+                        item_dict["image_file_id"] = str(file_id)
+                        self.logger.info(f"图片已存储到GridFS: {filename}, ID: {file_id}")
+                    except Exception as e:
+                        self.logger.error(f"存储图片到GridFS失败: {e}")
+                        raise
+                
+                modified_data_list.append(item_dict)
+            
+            # 更新文档数据
+            doc_data["data_list"] = modified_data_list
             doc_data.update({
                 "_id": ObjectId(),
                 "created_at": datetime.utcnow(),
@@ -159,23 +200,49 @@ class MongoDBManager:
         except Exception as e:
             self.logger.error(f"❌ 创建数据文档失败: {e}")
             raise
-    
-    async def get_document(self, document_id: str) -> Optional[DataDocumentResponse]:
+        
+    async def get_document(self, document_id: str) -> DataDocumentResponse:
         """获取数据文档"""
         try:
             collection = self.db[self.collection_name]
             
             # 查找文档
-            doc = await collection.find_one({"_id": ObjectId(document_id)})
-            if not doc:
-                return None
+            document = await collection.find_one({"_id": ObjectId(document_id)})
+            
+            if not document:
+                raise ValueError(f"未找到ID为 {document_id} 的数据文档")
+            
+            # 处理GridFS文件引用
+            for item in document["data_list"]:
+                if "image_file_id" in item and item["image_file_id"]:
+                    try:
+                        # 获取GridFS中的文件
+                        grid_out = await self.fs.open_download_stream(ObjectId(item["image_file_id"]))
+                        
+                        # 读取文件内容
+                        chunks = []
+                        async for chunk in grid_out:
+                            chunks.append(chunk)
+                        
+                        # 转换为base64
+                        image_data = b''.join(chunks)
+                        item["image"] = base64.b64encode(image_data).decode('utf-8')
+                        
+                        # 如果没有mimetype，从metadata中获取
+                        if not item.get("image_mimetype") and hasattr(grid_out, "metadata") and grid_out.metadata:
+                            item["image_mimetype"] = grid_out.metadata.get("mimetype", "image/png")
+                    except Exception as e:
+                        self.logger.error(f"从GridFS获取图片失败: {e}")
+                        # 继续处理，但不包含图片
             
             # 转换为响应模型
-            response_data = dict(doc)
+            response_data = dict(document)
             response_data["id"] = str(response_data.pop("_id"))
             
             return DataDocumentResponse(**response_data)
             
+        except ValueError:
+            raise
         except Exception as e:
             self.logger.error(f"❌ 获取数据文档失败: {e}")
             raise
