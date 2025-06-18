@@ -376,7 +376,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             elif synthesis_mode == "cross_lingual":
                 result = await self._cross_lingual_synthesis(text, kwargs)
             elif synthesis_mode == "instruct":
-                result = await self._instruct_synthesis(text, kwargs)
+                result, audio_text = await self._instruct_synthesis(text, kwargs)
             else:
                 # 默认使用零样本合成
                 result = await self._zero_shot_synthesis(text, kwargs)
@@ -391,7 +391,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                 True, language
             )
             
-            return result
+            return result, audio_text
             
         except Exception as e:
             processing_time = time.time() - start_time
@@ -482,7 +482,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
     async def _instruct_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """指令式语音合成"""
         reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
-        instruction = kwargs.get('instruction', '用温和的语调朗读')
+        instruction = kwargs.get('instruction', '用温和的女声朗读')
         
         if not reference_audio_path or not Path(reference_audio_path).exists():
             raise FileNotFoundError(f"参考音频文件不存在: {reference_audio_path}")
@@ -502,19 +502,21 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         
         # 执行指令式合成 - 使用正确的方法名 inference_instruct2
         output_audio = None
+        audio_text = None
         stream = kwargs.get('stream', False)
         
         for i, result in enumerate(self.model.inference_instruct2(
             text, instruction, reference_audio, stream=stream
         )):
             output_audio = result['tts_speech']
+            audio_text = result['text']
             if not stream:
                 break
         
         if output_audio is None:
             raise Exception("指令式合成失败，未生成音频")
         
-        return await self._process_output_audio(output_audio)
+        return (await self._process_output_audio(output_audio), audio_text)
     
     async def _process_output_audio(self, output_audio) -> Dict[str, Any]:
         """处理输出音频"""
