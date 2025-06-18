@@ -16,6 +16,7 @@ import uuid
 import subprocess
 import platform
 from openai import OpenAI
+from PIL import Image
 
 from .models import DataDocumentCreate, DataItemContent
 from .logger import get_logger
@@ -127,13 +128,29 @@ class PPTProcessor:
                 pdf_images = convert_from_path(pdf_path, dpi=200)
                 
                 for img in pdf_images:
-                    # 保存到内存中
+                    # 确保图片是RGB模式（防止透明通道导致WebP转换）
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                        
+                    # 保存到内存中，强制使用PNG格式
                     img_byte_arr = io.BytesIO()
-                    img.save(img_byte_arr, format='PNG')
+                    img.save(img_byte_arr, format='PNG', optimize=True)
                     img_byte_arr.seek(0)
                     
+                    # 验证保存的图片格式是否正确
+                    img_data = img_byte_arr.getvalue()
+                    # PNG文件的前8个字节是固定的签名
+                    if not img_data.startswith(b'\x89PNG\r\n\x1a\n'):
+                        self.logger.warning("图片格式不是PNG，尝试强制转换...")
+                        # 重新加载并保存
+                        temp_img = Image.open(io.BytesIO(img_data))
+                        img_byte_arr = io.BytesIO()
+                        temp_img.save(img_byte_arr, format='PNG', compress_level=9)
+                        img_byte_arr.seek(0)
+                        img_data = img_byte_arr.getvalue()
+                    
                     # 转换为Base64
-                    img_base64 = base64.b64encode(img_byte_arr.read()).decode('utf-8')
+                    img_base64 = base64.b64encode(img_data).decode('utf-8')
                     images.append(img_base64)
                 
                 # 删除临时PDF文件
