@@ -151,6 +151,35 @@ class MongoDBManager:
                         # 解码base64
                         image_data = base64.b64decode(item.image)
                         
+                        # 检查图片格式 - 如果不是PNG格式则转换
+                        if not image_data.startswith(b'\x89PNG\r\n\x1a\n'):
+                            self.logger.warning(f"检测到非PNG格式图片! 文件名: {item.image_filename or f'unknown_{idx}.png'}")
+                            # 强制转换为PNG
+                            try:
+                                from PIL import Image
+                                img = Image.open(io.BytesIO(image_data))
+                                
+                                # 确保图片是RGB模式
+                                if img.mode != 'RGB':
+                                    img = img.convert('RGB')
+                                    
+                                # 保存为PNG格式
+                                png_output = io.BytesIO()
+                                img.save(png_output, format='PNG')
+                                png_output.seek(0)
+                                image_data = png_output.getvalue()
+                                
+                                # 验证转换结果
+                                if not image_data.startswith(b'\x89PNG\r\n\x1a\n'):
+                                    self.logger.error("图片转换为PNG失败!")
+                                else:
+                                    self.logger.info(f"图片已成功转换为PNG格式")
+                            except Exception as e:
+                                self.logger.error(f"转换图片到PNG格式失败: {e}")
+                        
+                        # 强制设置MIME类型为PNG
+                        item_dict["image_mimetype"] = "image/png"
+                        
                         # 生成文件名
                         filename = item.image_filename or f"image_{document.name}_{idx}.png"
                         
@@ -161,7 +190,7 @@ class MongoDBManager:
                             metadata={
                                 "document_name": document.name,
                                 "sequence": item.sequence,
-                                "mimetype": item.image_mimetype or "image/png"
+                                "mimetype": item_dict["image_mimetype"]
                             }
                         )
                         
@@ -352,8 +381,34 @@ class MongoDBManager:
                             # 解码base64
                             image_data = base64.b64decode(image_field)
                             
-                            # 生成文件名
-                            doc_name = update_dict.get("name", existing["name"])
+                            # 检查图片格式 - 如果不是PNG格式则转换
+                            if not image_data.startswith(b'\x89PNG\r\n\x1a\n'):
+                                self.logger.warning(f"检测到非PNG格式图片! 文件名: {item_dict.get('image_filename', '') or f'unknown_{idx}.png'}")
+                                # 强制转换为PNG
+                                try:
+                                    from PIL import Image
+                                    img = Image.open(io.BytesIO(image_data))
+                                    
+                                    # 确保图片是RGB模式
+                                    if img.mode != 'RGB':
+                                        img = img.convert('RGB')
+                                        
+                                    # 保存为PNG格式
+                                    png_output = io.BytesIO()
+                                    img.save(png_output, format='PNG')
+                                    png_output.seek(0)
+                                    image_data = png_output.getvalue()
+                                    
+                                    # 验证转换结果
+                                    if not image_data.startswith(b'\x89PNG\r\n\x1a\n'):
+                                        self.logger.error("图片转换为PNG失败!")
+                                    else:
+                                        self.logger.info(f"图片已成功转换为PNG格式")
+                                except Exception as e:
+                                    self.logger.error(f"转换图片到PNG格式失败: {e}")
+                            
+                            # 强制设置MIME类型为PNG
+                            item_dict["image_mimetype"] = "image/png"
                             
                             # 获取文件名和序号
                             image_filename = item_dict.get("image_filename", "") if isinstance(item_dict, dict) else getattr(item, "image_filename", "")
@@ -361,14 +416,14 @@ class MongoDBManager:
                             mimetype = item_dict.get("image_mimetype", "image/png") if isinstance(item_dict, dict) else getattr(item, "image_mimetype", "image/png")
                             
                             # 使用提供的文件名或生成一个
-                            filename = image_filename or f"image_{doc_name}_{idx}.png"
+                            filename = image_filename or f"image_{update_dict.get('name', existing['name'])}_{idx}.png"
                             
                             # 上传到GridFS
                             file_id = await self.fs.upload_from_stream(
                                 filename,
                                 io.BytesIO(image_data),
                                 metadata={
-                                    "document_name": doc_name,
+                                    "document_name": update_dict.get("name", existing["name"]),
                                     "sequence": sequence,
                                     "mimetype": mimetype
                                 }

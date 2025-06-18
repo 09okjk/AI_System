@@ -139,15 +139,22 @@ class PPTProcessor:
                     
                     # 验证保存的图片格式是否正确
                     img_data = img_byte_arr.getvalue()
-                    # PNG文件的前8个字节是固定的签名
+                    # PNG文件的前8个字节是固定的签名: 89 50 4E 47 0D 0A 1A 0A
                     if not img_data.startswith(b'\x89PNG\r\n\x1a\n'):
-                        self.logger.warning("图片格式不是PNG，尝试强制转换...")
+                        self.logger.warning(f"检测到非PNG格式图片! 前10个字节: {img_data[:10].hex()}")
+                        self.logger.info("尝试强制转换为PNG...")
                         # 重新加载并保存
                         temp_img = Image.open(io.BytesIO(img_data))
                         img_byte_arr = io.BytesIO()
-                        temp_img.save(img_byte_arr, format='PNG', compress_level=9)
+                        temp_img.save(img_byte_arr, format='PNG')
                         img_byte_arr.seek(0)
                         img_data = img_byte_arr.getvalue()
+                        
+                        # 再次验证
+                        if not img_data.startswith(b'\x89PNG\r\n\x1a\n'):
+                            self.logger.error(f"强制转换失败! 图片格式仍然不是PNG! 前10个字节: {img_data[:10].hex()}")
+                    else:
+                        self.logger.info("图片格式验证成功: PNG格式")
                     
                     # 转换为Base64
                     img_base64 = base64.b64encode(img_data).decode('utf-8')
@@ -258,6 +265,27 @@ class PPTProcessor:
             图片描述文本
         """
         try:
+            # 检查图片格式 - 如果不是以PNG头开始，可能是WebP
+            image_data = base64.b64decode(image_base64)
+            if not image_data.startswith(b'\x89PNG\r\n\x1a\n'):
+                self.logger.warning(f"发送到API的图片不是PNG格式! 前10个字节: {image_data[:10].hex()}")
+                
+                # 强制转换为PNG
+                self.logger.info("尝试将图片转换为PNG...")
+                img = Image.open(io.BytesIO(image_data))
+                output = io.BytesIO()
+                img.save(output, format='PNG')
+                output.seek(0)
+                png_data = output.getvalue()
+                image_base64 = base64.b64encode(png_data).decode('utf-8')
+                
+                # 验证转换后的格式
+                converted_data = base64.b64decode(image_base64)
+                if not converted_data.startswith(b'\x89PNG\r\n\x1a\n'):
+                    self.logger.error("图片转换失败，仍然不是PNG格式!")
+                else:
+                    self.logger.info("图片成功转换为PNG格式")
+            
             # 对图片进行分析
             completion = self.client.chat.completions.create(
                 model=self.image_model,
