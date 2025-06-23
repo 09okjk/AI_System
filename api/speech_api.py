@@ -234,20 +234,35 @@ async def voice_chat_stream(
                 
                 logger.info(f"LLM 流式对话响应 [请求ID: {request_id}], 响应内容: {text_chunk}")
 
-                # 检查是否是JSON格式，如果是则提取content字段
-                try:
-                    # 尝试解析为JSON
-                    if isinstance(text_chunk, str) and text_chunk.strip().startswith('{'):
-                        json_data = json.loads(text_chunk)
-                        if 'content' in json_data:
-                            text_chunk = json_data.get('content', '')
-                            logger.info(f"提取到JSON中的content: {text_chunk}")
-                except Exception as json_err:
-                    # 如果解析失败，使用原始文本
-                    pass
+                # 初始化状态跟踪变量
+                if not hasattr(stream_generator, 'found_content_marker'):
+                    stream_generator.found_content_marker = False
+                    stream_generator.raw_buffer = ""
                 
-                # 累积到缓冲区
-                text_buffer += text_chunk
+                # 处理文本块
+                if not stream_generator.found_content_marker:
+                    # 在发现content标记前，先累积到原始缓冲区
+                    stream_generator.raw_buffer += text_chunk
+                    
+                    # 检查是否包含了content标记
+                    content_marker = '"content":'
+                    if content_marker in stream_generator.raw_buffer:
+                        # 找到content标记
+                        content_index = stream_generator.raw_buffer.find(content_marker) + len(content_marker)
+                        # 只保留标记后面的文本
+                        text_buffer = stream_generator.raw_buffer[content_index:].lstrip(' "')
+                        logger.info(f"检测到content标记，开始提取内容: {text_buffer}")
+                        # 设置标志，之后的文本直接进入主缓冲区
+                        stream_generator.found_content_marker = True
+                        # 不再需要原始缓冲区
+                        stream_generator.raw_buffer = ""
+                    else:
+                        # 未找到content标记，继续等待
+                        logger.info("等待content标记...")
+                        continue  # 跳过处理，继续接收下一块
+                else:
+                    # 已经找到content标记，直接处理文本
+                    text_buffer += text_chunk
                 
                 # 检查是否可以分段处理
                 should_process = False
