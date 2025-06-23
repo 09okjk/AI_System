@@ -273,7 +273,7 @@ async def voice_chat_stream(
                     }) + "\n"
                     
                     # 3. 生成此段的语音
-                    logger.info(f"为分段文本合成语音 [长度: {len(segment_text)}]")
+                    logger.info(f"为分段文本合成语音 [长度: {len(segment_text)}], 内容: {segment_text}")
                     
                     try:
                         synthesis_result = await managers['speech_processor'].synthesize(
