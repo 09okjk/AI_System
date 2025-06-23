@@ -125,7 +125,7 @@ async def voice_chat(
         logger.info(f"识别结果 [请求ID: {request_id}]: {user_text}")
         
         # 2. LLM 对话
-        logger.info(f"调用 LLM 模型 [请求ID: {request_id}]")
+        logger.info(f"调用 LLM 模型 [请求ID: {request_id}], 请求内容: {user_text}, 系统提示: {system_prompt}")
         
         chat_response = await managers['llm_manager'].chat(
             model_name=llm_model,
@@ -205,7 +205,7 @@ async def voice_chat_stream(
             }) + "\n"
             
             # 2. LLM 流式对话
-            logger.info(f"开始 LLM 流式对话 [请求ID: {request_id}], 请求内容: {user_text}")
+            logger.info(f"开始 LLM 流式对话 [请求ID: {request_id}], 请求内容: {user_text}, 系统提示: {system_prompt}")
             
             # 文本缓冲区，用于分段处理
             text_buffer = ""
@@ -231,6 +231,18 @@ async def voice_chat_stream(
                     
                 if not text_chunk:
                     continue
+                
+                # 检查是否是JSON格式，如果是则提取content字段
+                try:
+                    # 尝试解析为JSON
+                    if isinstance(text_chunk, str) and text_chunk.strip().startswith('{'):
+                        json_data = json.loads(text_chunk)
+                        if 'content' in json_data:
+                            text_chunk = json_data.get('content', '')
+                            logger.info(f"提取到JSON中的content: {text_chunk}")
+                except Exception as json_err:
+                    # 如果解析失败，使用原始文本
+                    pass
                 
                 # 累积到缓冲区
                 text_buffer += text_chunk
