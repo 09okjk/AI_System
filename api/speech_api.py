@@ -193,6 +193,7 @@ async def voice_chat_stream(
             )
             
             user_text = recognition_result.text
+            user_text = re.sub(r'<\s*\|\s*[^|]+\s*\|\s*>', '', user_text).strip()
             logger.info(f"识别结果 [请求ID: {request_id}]: {user_text}")
             
             # 发送识别结果
