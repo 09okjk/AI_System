@@ -262,7 +262,12 @@ async def voice_chat_stream(
                         continue  # 跳过处理，继续接收下一块
                 else:
                     # 已经找到content标记，直接处理文本
-                    text_buffer += text_chunk
+                    # 检查并移除末尾的"}"
+                    clean_chunk = text_chunk
+                    if clean_chunk.endswith('}'):
+                        clean_chunk = clean_chunk[:-1]
+                        logger.info(f"移除文本末尾的花括号: {clean_chunk}")
+                    text_buffer += clean_chunk
                 
                 # 检查是否可以分段处理
                 should_process = False
