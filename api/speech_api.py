@@ -203,7 +203,7 @@ async def voice_chat_stream(
             }) + "\n"
             
             # 2. LLM 流式对话
-            logger.info(f"开始 LLM 流式对话 [请求ID: {request_id}]")
+            logger.info(f"开始 LLM 流式对话 [请求ID: {request_id}], 请求内容: {user_text}")
             
             # 文本缓冲区，用于分段处理
             text_buffer = ""
