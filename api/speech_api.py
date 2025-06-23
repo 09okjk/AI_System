@@ -232,6 +232,8 @@ async def voice_chat_stream(
                 if not text_chunk:
                     continue
                 
+                logger.info(f"LLM 流式对话响应 [请求ID: {request_id}], 响应内容: {text_chunk}")
+
                 # 检查是否是JSON格式，如果是则提取content字段
                 try:
                     # 尝试解析为JSON
