@@ -193,7 +193,7 @@ class SenseVoiceRecognizer(SpeechRecognizer):
                     
                     # 提取文本
                     text = first_result.get('text', '') if isinstance(first_result, dict) else str(first_result)
-                    
+
                     # 提取置信度（如果可用）
                     confidence = first_result.get('confidence', 0.9) if isinstance(first_result, dict) else 0.9
                     

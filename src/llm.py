@@ -297,6 +297,7 @@ class XinferenceClient(LLMClient):
                 "content": message
             })
             
+            logger.info(f"调用 LLM 模型 [请求ID: {request_id}], messages: {messages}")
             # 调用 API
             response = await self.client.chat.completions.create(
                 model=self.config['model_name'],
