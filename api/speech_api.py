@@ -404,12 +404,31 @@ async def voice_chat_stream(
                     
                     yield json.dumps(response_data) + "\n"
                     
+                    # 定义文本清理函数，用于彻底清理可能的JSON残留
+                    def clean_text_for_synthesis(text):
+                        # 移除任何JSON开始标记
+                        json_start = text.find('{"')
+                        if json_start >= 0:
+                            text = text[:json_start]
+                            
+                        # 移除任何JSON结束标记
+                        json_end = text.find('}')
+                        if json_end >= 0:
+                            text = text[:json_end]
+                            
+                        # 移除多余的引号、标点符号
+                        text = text.rstrip('"\',.:;。，；：')
+                        
+                        return text
+                    
                     # 3. 生成此段的语音
-                    logger.info(f"为分段文本合成语音 [长度: {len(segment_text)}], 内容: {segment_text}")
+                    # 对文本进行彻底清理后再发送给语音合成器
+                    clean_segment_text = clean_text_for_synthesis(segment_text)
+                    logger.info(f"为分段文本合成语音 [长度: {len(clean_segment_text)}], 内容: {clean_segment_text}")
                     
                     try:
                         synthesis_result = await managers['speech_processor'].synthesize(
-                            text=segment_text,
+                            text=clean_segment_text,
                             request_id=f"{request_id}_seg_{int(time.time())}"
                         )
                         
@@ -453,7 +472,7 @@ async def voice_chat_stream(
             
             # 处理剩余的文本缓冲区
             if text_buffer:
-                # 发送最后一段文本
+                # 发送剩余的文本
                 response_data = {
                     "type": "text",
                     "segment_id": f"{request_id}_final",
@@ -468,8 +487,12 @@ async def voice_chat_stream(
                 
                 # 为最后一段文本合成语音
                 try:
+                    # 清理文本再发送
+                    clean_text_buffer = clean_text_for_synthesis(text_buffer)
+                    logger.info(f"为最终文本合成语音 [长度: {len(clean_text_buffer)}], 内容: {clean_text_buffer}")
+                    
                     synthesis_result = await managers['speech_processor'].synthesize(
-                        text=text_buffer,
+                        text=clean_text_buffer,
                         request_id=f"{request_id}_final"
                     )
                     
