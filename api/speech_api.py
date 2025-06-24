@@ -168,8 +168,9 @@ async def voice_chat(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== 优化的流式处理类 ====================
+
 class StreamProcessor:
-    """流式文本处理器 - 防止重复问题的改进版本"""
+    """流式文本处理器 - 避免重复问题"""
     
     def __init__(self, request_id: str, logger):
         self.request_id = request_id
@@ -181,51 +182,21 @@ class StreamProcessor:
         self.content_started = False
         self.current_page = None
         self.segment_counter = 0
-        
-        # 去重机制
-        self.processed_chunks: Set[str] = set()  # 已处理的文本块哈希
-        self.last_processed_content = ""  # 上一次处理的内容
+        self.processed_chunks = set()  # 添加去重集合
         
         # 配置
         self.min_segment_length = 40
         self.segment_markers = ["。", "！", "？", "；", ".", "!", "?", ";", "\n"]
-        self.max_buffer_size = 10000  # 最大缓冲区大小
-    
-    def _get_content_hash(self, content: str) -> str:
-        """生成内容哈希用于去重"""
-        return hashlib.md5(content.encode('utf-8')).hexdigest()
-    
+
     def process_chunk(self, text_chunk: str) -> str:
         """
-        处理单个文本块，返回可用于合成的文本 - 改进版本
+        处理单个文本块，返回可用于合成的文本
         """
-        if not text_chunk or not text_chunk.strip():
+        if not text_chunk:
             return ""
-        
-        # 生成当前块的哈希
-        chunk_hash = self._get_content_hash(text_chunk)
-        
-        # 检查是否已经处理过这个块
-        if chunk_hash in self.processed_chunks:
-            self.logger.debug(f"跳过重复的文本块: {text_chunk[:30]}...")
-            return ""
-        
-        # 添加到已处理集合
-        self.processed_chunks.add(chunk_hash)
-        
-        # 限制已处理集合的大小，防止内存泄漏
-        if len(self.processed_chunks) > 1000:
-            # 保留最近的500个
-            recent_chunks = list(self.processed_chunks)[-500:]
-            self.processed_chunks = set(recent_chunks)
         
         # 添加到原始缓冲区
         self.raw_buffer += text_chunk
-        
-        # 限制缓冲区大小
-        if len(self.raw_buffer) > self.max_buffer_size:
-            self.raw_buffer = self.raw_buffer[-self.max_buffer_size//2:]
-            self.logger.warning("原始缓冲区过大，已截断")
         
         # 如果还没开始接收内容，检查是否包含content标记
         if not self.content_started:
@@ -235,11 +206,21 @@ class StreamProcessor:
             return self._process_content_chunk(text_chunk)
     
     def _check_content_start(self) -> str:
-        """检查是否开始接收内容 - 改进版本"""
+        """检查是否开始接收内容"""
+
+        if not self.raw_buffer or self.raw_buffer in self.processed_chunks:
+            return ""
+        
+        # 添加到已处理集合
+        chunk_hash = hash(self.raw_buffer)
+        if chunk_hash in self.processed_chunks:
+            return ""
+        self.processed_chunks.add(chunk_hash)
+  
         content_marker = '"content":'
         
         if content_marker not in self.raw_buffer:
-            return ""
+            return ""  # 还没找到内容标记
         
         # 提取页码信息
         self._extract_page_info()
@@ -248,19 +229,18 @@ class StreamProcessor:
         content_index = self.raw_buffer.find(content_marker) + len(content_marker)
         content_text = self.raw_buffer[content_index:].lstrip(' "')
         
-        # 更彻底的JSON清理
+        # 清理可能的JSON结束标记
         content_text = self._clean_json_artifacts(content_text)
         
         # 设置状态
         self.content_started = True
-        self.last_processed_content = content_text
         self.raw_buffer = ""  # 清空原始缓冲区
         
         self.logger.info(f"开始接收内容: {content_text[:50]}...")
         return content_text
     
     def _process_content_chunk(self, text_chunk: str) -> str:
-        """处理内容块 - 改进版本"""
+        """处理内容块"""
         # 检查是否有新的JSON响应开始
         if '"page":' in text_chunk:
             self._extract_page_from_chunk(text_chunk)
@@ -268,52 +248,13 @@ class StreamProcessor:
         # 清理JSON标记
         cleaned_text = self._clean_json_artifacts(text_chunk)
         
-        # 移除可能重复的content标记和其他JSON结构
+        # 移除可能重复的content标记
         if '"content":' in cleaned_text:
             content_index = cleaned_text.find('"content":') + len('"content":')
             cleaned_text = cleaned_text[content_index:].lstrip(' "')
-            self.logger.debug("移除重复的content标记")
+            self.logger.info("移除重复的content标记")
         
-        # 检查与上次处理内容的重复
-        if cleaned_text and cleaned_text == self.last_processed_content:
-            self.logger.debug(f"跳过与上次相同的内容: {cleaned_text[:30]}...")
-            return ""
-        
-        # 检查是否是前一内容的子串（部分重复）
-        if cleaned_text and self.last_processed_content:
-            if cleaned_text in self.last_processed_content or self.last_processed_content in cleaned_text:
-                # 如果是扩展内容，只返回新增部分
-                if len(cleaned_text) > len(self.last_processed_content):
-                    new_content = cleaned_text[len(self.last_processed_content):].lstrip()
-                    self.last_processed_content = cleaned_text
-                    return new_content
-                else:
-                    return ""
-        
-        self.last_processed_content = cleaned_text
         return cleaned_text
-    
-    def _clean_json_artifacts(self, text: str) -> str:
-        """更彻底的JSON结构标记清理"""
-        if not text:
-            return ""
-        
-        # 移除JSON结束标记
-        text = re.sub(r'\s*["}]+\s*$', '', text)
-        
-        # 移除其他JSON标记
-        text = text.replace(',"', ' ').replace('"}', '').replace('\\"', '"')
-        
-        # 处理换行符
-        text = text.replace('\\n', '\n').replace('\\t', '\t')
-        
-        # 移除多余的引号
-        text = re.sub(r'^"+(.*?)"*$', r'\1', text)
-        
-        # 清理多余的空白字符
-        text = re.sub(r'\s+', ' ', text).strip()
-        
-        return text
     
     def _extract_page_info(self):
         """从原始缓冲区提取页码信息"""
@@ -322,9 +263,8 @@ class StreamProcessor:
             match = re.search(page_pattern, self.raw_buffer)
             if match:
                 page_value = match.group(1).strip().strip('"\'')
-                if page_value != self.current_page:
-                    self.current_page = page_value
-                    self.logger.info(f"提取到页码: {self.current_page}")
+                self.current_page = page_value
+                self.logger.info(f"提取到页码: {self.current_page}")
         except Exception as e:
             self.logger.warning(f"页码提取失败: {str(e)}")
     
@@ -335,26 +275,31 @@ class StreamProcessor:
             match = re.search(page_pattern, text_chunk)
             if match:
                 page_value = match.group(1).strip().strip('"\'')
-                if page_value != self.current_page:
+                if page_value != self.current_page:  # 只在页码变化时更新
                     self.current_page = page_value
                     self.logger.info(f"更新页码: {self.current_page}")
         except Exception as e:
             self.logger.warning(f"页码更新失败: {str(e)}")
     
+    def _clean_json_artifacts(self, text: str) -> str:
+        """清理JSON结构标记"""
+        # 移除JSON结束标记
+        if '}' in text and text.strip().endswith('}'):
+            json_end = text.rfind('}')
+            text = text[:json_end]
+        
+        # 移除其他可能的JSON标记
+        text = text.replace(',"', ' ').replace('"}', '').replace('\\n', '\n')
+        
+        return text
+    
     def add_to_buffer(self, text: str):
-        """添加文本到缓冲区 - 改进版本"""
-        if text and text.strip():
-            # 避免添加重复内容
-            if text != self.text_buffer[-len(text):] if len(self.text_buffer) >= len(text) else True:
-                self.text_buffer += text
-                
-                # 限制缓冲区大小
-                if len(self.text_buffer) > self.max_buffer_size:
-                    self.text_buffer = self.text_buffer[-self.max_buffer_size//2:]
-                    self.logger.warning("文本缓冲区过大，已截断")
+        """添加文本到缓冲区"""
+        if text:
+            self.text_buffer += text
     
     def check_segment(self) -> Optional[str]:
-        """检查是否可以分段 - 改进版本"""
+        """检查是否可以分段"""
         if len(self.text_buffer) < self.min_segment_length:
             return None
         
@@ -372,28 +317,19 @@ class StreamProcessor:
             self.text_buffer = self.text_buffer[split_point:].strip()
             self.segment_counter += 1
             
-            # 验证分段不为空且不重复
-            if segment and len(segment) > 5:
-                self.logger.info(f"文本分段 #{self.segment_counter}: {segment[:50]}...")
-                return segment
+            self.logger.info(f"文本分段 #{self.segment_counter}: {segment[:50]}...")
+            return segment
         
         return None
     
     def get_final_segment(self) -> Optional[str]:
-        """获取最终剩余的文本段 - 改进版本"""
-        if self.text_buffer.strip() and len(self.text_buffer.strip()) > 5:
+        """获取最终剩余的文本段"""
+        if self.text_buffer.strip():
             final_text = self.text_buffer.strip()
             self.text_buffer = ""
             self.logger.info(f"最终文本段: {final_text[:50]}...")
             return final_text
         return None
-    
-    def cleanup(self):
-        """清理资源"""
-        self.processed_chunks.clear()
-        self.raw_buffer = ""
-        self.text_buffer = ""
-        self.last_processed_content = ""
 
 # ==================== 修复的流式语音对话接口 ====================
 
