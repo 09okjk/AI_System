@@ -1,5 +1,5 @@
 """
-语音处理相关接口模块 - 修改为SSE协议
+语音处理相关接口模块
 """
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
@@ -167,10 +167,169 @@ async def voice_chat(
         logger.error(f"语音对话失败 [请求ID: {request_id}]: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-def format_sse_event(event_type: str, data: dict) -> str:
-    """格式化SSE事件"""
-    json_data = json.dumps(data, ensure_ascii=False)
-    return f"event: {event_type}\ndata: {json_data}\n\n"
+# ==================== 优化的辅助函数 ====================
+
+async def process_stream_chunk(text_chunk, cache_state, logger, request_id):
+    """处理单个流式数据块，提取page和content信息"""
+    # 首次接收内容，进行处理
+    if not cache_state["content_started"]:
+        # 先添加到原始缓冲区
+        cache_state["raw_buffer"] += text_chunk
+        
+        # 尝试提取page属性
+        if '"page":' in cache_state["raw_buffer"]:
+            try:
+                # 更稳健的JSON解析方式
+                page_pattern = r'"page"\s*:\s*([^,}]+)'
+                match = re.search(page_pattern, cache_state["raw_buffer"])
+                if match:
+                    page_value = match.group(1).strip().strip('"\'')
+                    cache_state["current_page"] = page_value
+                    logger.info(f"提取到页码: {cache_state['current_page']}")
+            except Exception as e:
+                logger.warning(f"页码提取失败: {str(e)}")
+        
+        # 检查是否开始接收content
+        if '"content":' in cache_state["raw_buffer"]:
+            content_marker = '"content":'
+            content_index = cache_state["raw_buffer"].find(content_marker) + len(content_marker)
+            raw_content = cache_state["raw_buffer"][content_index:].lstrip(' "')
+            
+            # 清理JSON结构
+            json_end = raw_content.find('}')
+            if json_end >= 0:
+                processed_text = raw_content[:json_end].rstrip('"')
+            else:
+                processed_text = raw_content.rstrip('"')
+                
+            # 清理嵌套JSON
+            json_start = processed_text.find('{"')
+            if json_start >= 0:
+                processed_text = processed_text[:json_start]
+            
+            cache_state["content_started"] = True
+            cache_state["raw_buffer"] = ""  # 清空原始缓存
+            logger.info(f"开始接收content内容: {processed_text[:50]}...")
+            
+            # 重要：返回处理后的文本，而不是累积
+            return processed_text
+        else:
+            # 尚未找到content标记，继续等待
+            return ""
+    else:
+        # 已经开始接收content
+        
+        # 检查是否有新的JSON响应开始
+        if '"content":' in text_chunk:
+            logger.info("检测到新的JSON响应")
+            
+            # 尝试提取新的页码
+            try:
+                page_pattern = r'"page"\s*:\s*([^,}]+)'
+                match = re.search(page_pattern, text_chunk)
+                if match:
+                    page_value = match.group(1).strip().strip('"\'')
+                    cache_state["current_page"] = page_value
+                    logger.info(f"更新页码: {cache_state['current_page']}")
+            except Exception as e:
+                logger.warning(f"页码更新失败: {str(e)}")
+            
+            # 提取新的content内容
+            content_marker = '"content":'
+            content_index = text_chunk.find(content_marker) + len(content_marker)
+            raw_content = text_chunk[content_index:].lstrip(' "')
+            
+            # 清理JSON结构
+            json_end = raw_content.find('}')
+            if json_end >= 0:
+                processed_text = raw_content[:json_end].rstrip('"')
+            else:
+                processed_text = raw_content.rstrip('"')
+                
+            # 清理嵌套JSON
+            json_start = processed_text.find('{"')
+            if json_start >= 0:
+                processed_text = processed_text[:json_start]
+                
+            # 重要：发现新的JSON响应时，重置文本缓冲区
+            cache_state["text_buffer"] = ""
+            logger.info("检测到新响应，重置文本缓冲区")
+            
+            return processed_text
+        else:
+            # 普通文本块，清理后返回
+            processed_text = text_chunk
+            
+            # 清理可能的JSON字符串
+            json_start = processed_text.find('{"')
+            if json_start >= 0:
+                processed_text = processed_text[:json_start]
+                
+            # 清理结束括号和引号
+            json_end = processed_text.find('}')
+            if json_end >= 0:
+                processed_text = processed_text[:json_end]
+                
+            processed_text = processed_text.rstrip('",')
+            
+            return processed_text
+
+async def check_and_process_segment(cache_state, min_segment_length, segment_markers):
+    """检查是否需要分段，如果需要则返回分段文本"""
+    text_buffer = cache_state["text_buffer"]
+    
+    # 如果缓冲区为空，不处理
+    if not text_buffer:
+        return None
+    
+    # 如果文本长度够长，检查分段点
+    if len(text_buffer) >= min_segment_length:
+        last_marker_pos = -1
+        last_marker_len = 0
+        
+        # 查找最合适的分段点（最靠近末尾的标点符号）
+        for marker in segment_markers:
+            pos = text_buffer.rfind(marker)
+            if pos > last_marker_pos:
+                last_marker_pos = pos
+                last_marker_len = len(marker)
+        
+        # 如果找到了分段点
+        if last_marker_pos > 0:
+            process_index = last_marker_pos + last_marker_len
+            segment_text = text_buffer[:process_index]
+            
+            # 重要：更新缓冲区，移除已处理的文本
+            cache_state["text_buffer"] = text_buffer[process_index:]
+            cache_state["segment_counter"] += 1
+            
+            # 记录分段边界，帮助调试
+            logger.info(f"分段点: '{text_buffer[last_marker_pos:process_index]}' 位置: {last_marker_pos}")
+            logger.info(f"分段文本: '{segment_text}'")
+            logger.info(f"剩余缓冲: '{cache_state['text_buffer'][:20]}...'")
+            
+            return segment_text
+    
+    return None
+
+async def process_audio_data(audio_data):
+    """统一处理音频数据转Base64"""
+    def is_already_base64(data):
+        try:
+            base64.b64decode(data)
+            return True
+        except:
+            return False
+    
+    if isinstance(audio_data, str) and is_already_base64(audio_data):
+        return audio_data
+    elif isinstance(audio_data, bytes):
+        return base64.b64encode(audio_data).decode('utf-8')
+    else:
+        # 如果是其他类型，尝试转换为bytes再编码
+        return base64.b64encode(str(audio_data).encode('utf-8')).decode('utf-8')
+
+# ==================== 优化的流式语音对话接口 ====================
 
 @router.post("/api/chat/voice/stream")
 async def voice_chat_stream(
@@ -179,15 +338,14 @@ async def voice_chat_stream(
     system_prompt: Optional[str] = None,
     session_id: Optional[str] = None
 ):
-    """流式语音对话接口（语音输入 + 流式文本和语音输出）- SSE协议"""
+    """流式语音对话接口（语音输入 + 流式文本和语音输出）- 优化版本"""
     managers = get_managers()
     logger = managers['logger']
     
     request_id = generate_response_id()
     logger.info(f"开始流式语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
     
-    # 为流式响应创建生成器函数
-    async def sse_stream_generator():
+    async def stream_generator():
         try:
             # 1. 语音识别
             audio_data = await audio_file.read()
@@ -203,30 +361,29 @@ async def voice_chat_stream(
             logger.info(f"识别结果 [请求ID: {request_id}]: {user_text}")
             
             # 发送识别结果
-            yield format_sse_event("recognition", {
+            yield json.dumps({
+                "type": "recognition",
                 "request_id": request_id,
                 "text": user_text
-            })
+            }) + "\n"
             
-            # 2. LLM 流式对话
-            logger.info(f"开始 LLM 流式对话 [请求ID: {request_id}], 请求内容: {user_text}, 系统提示: {system_prompt}")
+            # 2. LLM 流式对话 - 优化缓存处理
+            logger.info(f"开始 LLM 流式对话 [请求ID: {request_id}]")
             
-            # 文本缓冲区，用于分段处理
-            text_buffer = ""
-            # 文本分段的最小长度（中文约30-50字为宜）
+            # 优化的缓存状态管理
+            cache_state = {
+                "raw_buffer": "",           # 原始JSON数据缓存
+                "text_buffer": "",          # 提取的文本内容缓存
+                "current_page": None,       # 当前页码
+                "content_started": False,   # 是否开始接收content内容
+                "segment_counter": 0        # 分段计数器
+            }
+            
+            # 分段配置
             min_segment_length = 40
-            # 定义分段标记（可以是标点符号或自然段落）
             segment_markers = ["。", "！", "？", "；", ".", "!", "?", ";", "\n"]
             
-            # 调用流式LLM对话
             start_time = time.time()
-            
-            # 初始化状态跟踪变量
-            found_content_marker = False
-            raw_buffer = ""
-            chunks_processed = 0
-            current_page = None
-            
             async for chunk in managers['llm_manager'].stream_chat(
                 model_name=llm_model,
                 message=user_text,
@@ -235,247 +392,146 @@ async def voice_chat_stream(
                 request_id=request_id
             ):
                 # 获取文本块
-                if isinstance(chunk, dict):
-                    text_chunk = chunk.get("content", "")
-                else:
-                    text_chunk = chunk
-                    
+                text_chunk = chunk.get("content", "") if isinstance(chunk, dict) else chunk
                 if not text_chunk:
                     continue
-
-                # 检查是否超过一定数量的块还未找到标记，如果是则放弃等待
-                if not found_content_marker:
-                    chunks_processed += 1
-                    # 如果处理了10个块还没找到标记，放弃等待直接处理
-                    if chunks_processed > 10:
-                        logger.warning(f"已处理{chunks_processed}个文本块但未找到content标记，将直接处理文本")
-                        found_content_marker = True
                 
-                processed_chunk = ""
-                # 处理文本块
-                if not found_content_marker:
-                    # 在发现content标记前，先累积到原始缓冲区
-                    raw_buffer += text_chunk
-                    
-                    # 检查是否包含了content标记
-                    content_marker = '"content":'
-                    if content_marker in raw_buffer:
-                        # 尝试提取页码
-                        try:
-                            page_marker = '"page":'
-                            if page_marker in raw_buffer:
-                                page_start = raw_buffer.find(page_marker) + len(page_marker)
-                                page_end = raw_buffer.find(',', page_start)
-                                if page_end == -1:
-                                    page_end = raw_buffer.find('}', page_start)
-                                if page_end > page_start:
-                                    page_str = raw_buffer[page_start:page_end].strip()
-                                    current_page = page_str.strip(' "\'')
-                                    logger.info(f"提取到页码: {current_page}")
-                        except:
-                            # 如果提取失败也不影响主流程
-                            pass
-                            
-                        # 找到content标记
-                        content_index = raw_buffer.find(content_marker) + len(content_marker)
-                        # 只保留标记后面的文本
-                        processed_chunk = raw_buffer[content_index:].lstrip(' "')
-                        logger.info(f"检测到content标记，开始提取内容: {processed_chunk}")
-                        # 设置标志，之后的文本直接进入主缓冲区
-                        found_content_marker = True
-                        # 不再需要原始缓冲区
-                        raw_buffer = ""
-                        
-                        # 清空之前可能已经添加的JSON开头部分
-                        text_buffer = ""
-                        logger.info("清空之前的文本缓冲区，避免JSON结构重复")
-                    else:
-                        # 未找到content标记，跳过当前块
-                        logger.info("等待content标记...")
-                        continue
-                else:
-                    # 已经找到content标记，直接处理文本
-                    processed_chunk = text_chunk
-                    
-                    # 检查是否有新的JSON响应开始
-                    if '"content":' in processed_chunk:
-                        logger.info("检测到新的content标记")
-                        
-                        # 尝试提取新的页码
-                        try:
-                            page_marker = '"page":'
-                            if page_marker in processed_chunk:
-                                page_start = processed_chunk.find(page_marker) + len(page_marker)
-                                page_end = processed_chunk.find(',', page_start)
-                                if page_end == -1:
-                                    page_end = processed_chunk.find('}', page_start)
-                                if page_end > page_start:
-                                    page_str = processed_chunk[page_start:page_end].strip()
-                                    current_page = page_str.strip(' "\'')
-                                    logger.info(f"提取到新页码: {current_page}")
-                        except:
-                            # 如果提取失败也不影响主流程
-                            pass
-                    
-                    # 尝试移除JSON结束标记
-                    try:
-                        json_end = processed_chunk.find('}')
-                        if json_end >= 0:
-                            processed_chunk = processed_chunk[:json_end]
-                            logger.info("移除JSON结束标记")
-                    except:
-                        # 如果移除失败也不影响主流程
-                        pass
+                # 处理流式数据缓存
+                processed_text = await process_stream_chunk(
+                    text_chunk, cache_state, logger, request_id
+                )
                 
-                # 添加到文本缓冲区
-                text_buffer += processed_chunk
-                
-                # 检查是否可以分段处理
-                should_process = False
-                process_index = len(text_buffer)
-                
-                # 如果文本长度超过最小分段长度，检查是否有合适的分段点
-                if len(text_buffer) >= min_segment_length:
-                    for marker in segment_markers:
-                        last_marker = text_buffer.rfind(marker)
-                        if last_marker > 0:  # 找到标记
-                            process_index = last_marker + len(marker)
-                            should_process = True
-                            break
-                
-                # 如果找到分段点，处理此段
-                if should_process:
-                    segment_text = text_buffer[:process_index]
-                    text_buffer = text_buffer[process_index:]
+                # 只有当处理出有效文本时才添加到缓冲区
+                if processed_text:
+                    logger.info(f"添加处理后的文本到缓冲区 [{len(processed_text)} 字符]: {processed_text[:30]}...")
+                    cache_state["text_buffer"] += processed_text
                     
-                    # 发送文本分段
-                    response_data = {
-                        "segment_id": f"{request_id}_{int(time.time())}", 
-                        "text": segment_text
-                    }
-                    
-                    # 添加页码信息
-                    if current_page is not None:
-                        response_data["page"] = current_page
-                    
-                    yield format_sse_event("text", response_data)
-                    
-                    # 3. 生成此段的语音
-                    logger.info(f"为分段文本合成语音 [长度: {len(segment_text)}], 内容: {segment_text}")
-                    
-                    try:
-                        synthesis_result = await managers['speech_processor'].synthesize(
-                            text=segment_text,
-                            request_id=f"{request_id}_seg_{int(time.time())}"
-                        )
-                        
-                        def is_already_base64(data):
-                            try:
-                                # 尝试解码，如果成功则可能已经是Base64
-                                base64.b64decode(data)
-                                return True
-                            except:
-                                return False
-                        
-                        # 确保音频数据是字节类型，然后转换为Base64
-                        audio_data = synthesis_result.audio_data
-                        # 如果已经是Base64，直接使用
-                        if isinstance(audio_data, str) and is_already_base64(audio_data):
-                            audio_base64 = audio_data
-                        # 否则进行Base64编码
-                        elif isinstance(audio_data, bytes):
-                            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-                        
-                        # 发送音频段
-                        response_data = {
-                            "segment_id": f"{request_id}_{int(time.time())}",
-                            "text": segment_text,
-                            "audio": audio_base64,
-                            "format": synthesis_result.format
-                        }
-                        
-                        # 添加页码信息
-                        if current_page is not None:
-                            response_data["page"] = current_page
-                            
-                        yield format_sse_event("audio", response_data)
-                    except Exception as e:
-                        logger.error(f"音频合成失败: {str(e)}")
-                        yield format_sse_event("error", {
-                            "message": f"音频合成失败: {str(e)}"
-                        })
-            
-            # 处理剩余的文本缓冲区
-            if text_buffer:
-                # 发送最后一段文本
-                response_data = {
-                    "segment_id": f"{request_id}_final",
-                    "text": text_buffer
-                }
-                
-                # 添加页码信息
-                if current_page is not None:
-                    response_data["page"] = current_page
-                    
-                yield format_sse_event("text", response_data)
-                
-                # 为最后一段文本合成语音
-                try:
-                    synthesis_result = await managers['speech_processor'].synthesize(
-                        text=text_buffer,
-                        request_id=f"{request_id}_final"
+                    # 检查是否需要分段处理
+                    segment_text = await check_and_process_segment(
+                        cache_state, min_segment_length, segment_markers
                     )
                     
-                    # 确保音频数据是字节类型，然后转换为Base64
-                    audio_data = synthesis_result.audio_data
-                    if isinstance(audio_data, str):
-                        # 如果是字符串，需要先编码为字节
-                        audio_data = audio_data.encode('utf-8')
+                    if segment_text:
+                        # 发送文本段和音频
+                        segment_id = f"{request_id}_seg_{cache_state['segment_counter']}"
                         
-                    # 将二进制音频数据转换为Base64编码的字符串
-                    audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                        # 发送文本分段
+                        text_response = {
+                            "type": "text",
+                            "segment_id": segment_id,
+                            "text": segment_text
+                        }
+                        
+                        if cache_state["current_page"]:
+                            text_response["page"] = cache_state["current_page"]
+                        
+                        yield json.dumps(text_response) + "\n"
+                        logger.info(f"发送文本分段 [ID: {segment_id}]: {segment_text[:50]}...")
+                        
+                        # 生成并发送音频
+                        try:
+                            logger.info(f"为分段文本合成语音 [长度: {len(segment_text)}]")
+                            
+                            synthesis_result = await managers['speech_processor'].synthesize(
+                                text=segment_text,
+                                request_id=segment_id
+                            )
+                            
+                            # 处理音频数据
+                            audio_base64 = await process_audio_data(synthesis_result.audio_data)
+                            
+                            audio_response = {
+                                "type": "audio",
+                                "segment_id": segment_id,
+                                "text": segment_text,
+                                "audio": audio_base64,
+                                "format": synthesis_result.format
+                            }
+                            
+                            if cache_state["current_page"]:
+                                audio_response["page"] = cache_state["current_page"]
+                            
+                            yield json.dumps(audio_response) + "\n"
+                            logger.info(f"发送音频分段 [ID: {segment_id}]: 音频长度 {len(audio_base64)} 字符")
+                            
+                        except Exception as e:
+                            logger.error(f"音频合成失败 [分段: {segment_id}]: {str(e)}")
+                            yield json.dumps({
+                                "type": "error",
+                                "segment_id": segment_id,
+                                "message": f"音频合成失败: {str(e)}"
+                            }) + "\n"
+            
+            # 处理剩余缓存内容
+            if cache_state["text_buffer"]:
+                final_text = cache_state["text_buffer"]
+                segment_id = f"{request_id}_final"
+                
+                # 发送最终文本
+                text_response = {
+                    "type": "text",
+                    "segment_id": segment_id,
+                    "text": final_text
+                }
+                
+                if cache_state["current_page"]:
+                    text_response["page"] = cache_state["current_page"]
+                
+                yield json.dumps(text_response) + "\n"
+                logger.info(f"发送最终文本 [ID: {segment_id}]: {final_text[:50]}...")
+                
+                # 生成最终音频
+                try:
+                    logger.info(f"为最终文本合成语音 [长度: {len(final_text)}]")
                     
-                    # 发送最后一段音频
-                    response_data = {
-                        "segment_id": f"{request_id}_final",
-                        "text": text_buffer,
+                    synthesis_result = await managers['speech_processor'].synthesize(
+                        text=final_text,
+                        request_id=segment_id
+                    )
+                    
+                    audio_base64 = await process_audio_data(synthesis_result.audio_data)
+                    
+                    audio_response = {
+                        "type": "audio",
+                        "segment_id": segment_id,
+                        "text": final_text,
                         "audio": audio_base64,
                         "format": synthesis_result.format
                     }
                     
-                    # 添加页码信息
-                    if current_page is not None:
-                        response_data["page"] = current_page
-                        
-                    yield format_sse_event("audio", response_data)
+                    if cache_state["current_page"]:
+                        audio_response["page"] = cache_state["current_page"]
+                    
+                    yield json.dumps(audio_response) + "\n"
+                    logger.info(f"发送最终音频 [ID: {segment_id}]: 音频长度 {len(audio_base64)} 字符")
+                    
                 except Exception as e:
                     logger.error(f"最终音频合成失败: {str(e)}")
-                    yield format_sse_event("error", {
+                    yield json.dumps({
+                        "type": "error",
+                        "segment_id": segment_id,
                         "message": f"最终音频合成失败: {str(e)}"
-                    })
+                    }) + "\n"
             
             # 发送完成信号
             processing_time = time.time() - start_time
-            yield format_sse_event("done", {
+            yield json.dumps({
+                "type": "done",
                 "request_id": request_id,
-                "processing_time": processing_time
-            })
+                "processing_time": processing_time,
+                "page": cache_state["current_page"]  # 在完成信号中也包含页码
+            }) + "\n"
             
             logger.info(f"流式语音对话完成 [请求ID: {request_id}] - 总时长: {processing_time:.2f}s")
             
         except Exception as e:
             logger.error(f"流式语音对话失败 [请求ID: {request_id}]: {str(e)}")
-            yield format_sse_event("error", {
+            yield json.dumps({
+                "type": "error",
                 "message": str(e)
-            })
+            }) + "\n"
     
-    # 返回流式响应 - 使用SSE格式
     return StreamingResponse(
-        sse_stream_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # 禁用Nginx缓冲
-        }
+        stream_generator(),
+        media_type="application/x-ndjson"
     )
