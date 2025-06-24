@@ -283,11 +283,24 @@ async def voice_chat_stream(
                             continue
                 else:
                     # 已经找到content标记，直接处理文本
-                    # 检查并移除末尾的"}"
-                    processed_chunk = text_chunk
-                    if processed_chunk.endswith('}'):
-                        processed_chunk = processed_chunk[:-1]
-                        logger.info(f"移除文本末尾的花括号: {processed_chunk}")
+                    # 检查是否有完整JSON结构（新的输出可能开始）
+                    if '"content":' in text_chunk:
+                        # 发现新的content标记，丢弃之前的所有内容
+                        logger.info("检测到新的content标记，可能是新的JSON响应")
+                        content_index = text_chunk.find('"content":') + len('"content":')
+                        processed_chunk = text_chunk[content_index:].lstrip(' "')
+                        # 清空之前的缓冲区
+                        text_buffer = ""
+                    else:
+                        # 普通文本块处理
+                        processed_chunk = text_chunk
+                    
+                    # 检查并移除末尾的花括号和后续可能的JSON
+                    json_end = processed_chunk.find('}')
+                    if json_end >= 0:
+                        # 只保留花括号之前的内容
+                        processed_chunk = processed_chunk[:json_end]
+                        logger.info(f"移除文本中的JSON结束标记及之后内容: {processed_chunk}")
                 
                 # 添加到文本缓冲区
                 text_buffer += processed_chunk
