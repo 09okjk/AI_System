@@ -1,5 +1,5 @@
 """
-语音处理相关接口模块 - 修复文本重复问题
+语音处理相关接口模块
 """
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
@@ -167,171 +167,97 @@ async def voice_chat(
         logger.error(f"语音对话失败 [请求ID: {request_id}]: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==================== 优化的流式处理类 ====================
+# ==================== 优化的辅助函数 ====================
 
-class StreamProcessor:
-    """流式文本处理器 - 避免重复问题"""
+async def process_stream_chunk(text_chunk, cache_state, logger, request_id):
+    """处理单个流式数据块，提取page和content信息"""
+    cache_state["raw_buffer"] += text_chunk
     
-    def __init__(self, request_id: str, logger):
-        self.request_id = request_id
-        self.logger = logger
+    if not cache_state["content_started"]:
+        # 尝试提取page属性
+        if '"page":' in cache_state["raw_buffer"]:
+            try:
+                # 更稳健的JSON解析方式
+                page_pattern = r'"page"\s*:\s*([^,}]+)'
+                match = re.search(page_pattern, cache_state["raw_buffer"])
+                if match:
+                    page_value = match.group(1).strip().strip('"\'')
+                    cache_state["current_page"] = page_value
+                    logger.info(f"提取到页码: {cache_state['current_page']}")
+            except Exception as e:
+                logger.warning(f"页码提取失败: {str(e)}")
         
-        # 状态管理
-        self.raw_buffer = ""
-        self.text_buffer = ""
-        self.content_started = False
-        self.current_page = None
-        self.segment_counter = 0
-        self.processed_chunks = set()  # 添加去重集合
-        
-        # 配置
-        self.min_segment_length = 40
-        self.segment_markers = ["。", "！", "？", "；", ".", "!", "?", ";", "\n"]
-
-    def process_chunk(self, text_chunk: str) -> str:
-        """
-        处理单个文本块，返回可用于合成的文本
-        """
-        if not text_chunk:
-            return ""
-        
-        # 添加到原始缓冲区
-        self.raw_buffer += text_chunk
-        
-        # 如果还没开始接收内容，检查是否包含content标记
-        if not self.content_started:
-            return self._check_content_start()
-        else:
-            # 已经开始接收内容，直接处理
-            return self._process_content_chunk(text_chunk)
-    
-    def _check_content_start(self) -> str:
-        """检查是否开始接收内容"""
-
-        if not self.raw_buffer or self.raw_buffer in self.processed_chunks:
-            return ""
-        
-        # 添加到已处理集合
-        chunk_hash = hash(self.raw_buffer)
-        if chunk_hash in self.processed_chunks:
-            return ""
-        self.processed_chunks.add(chunk_hash)
-  
-        content_marker = '"content":'
-        
-        if content_marker not in self.raw_buffer:
-            return ""  # 还没找到内容标记
-        
-        # 提取页码信息
-        self._extract_page_info()
-        
-        # 找到内容标记，提取内容
-        content_index = self.raw_buffer.find(content_marker) + len(content_marker)
-        content_text = self.raw_buffer[content_index:].lstrip(' "')
-        
-        # 清理可能的JSON结束标记
-        content_text = self._clean_json_artifacts(content_text)
-        
-        # 设置状态
-        self.content_started = True
-        self.raw_buffer = ""  # 清空原始缓冲区
-        
-        self.logger.info(f"开始接收内容: {content_text[:50]}...")
-        return content_text
-    
-    def _process_content_chunk(self, text_chunk: str) -> str:
-        """处理内容块"""
-        # 检查是否有新的JSON响应开始
+        # 检查是否开始接收content
+        if '"content":' in cache_state["raw_buffer"]:
+            content_index = cache_state["raw_buffer"].find('"content":') + len('"content":')
+            processed_text = cache_state["raw_buffer"][content_index:].lstrip(' "')
+            cache_state["content_started"] = True
+            cache_state["raw_buffer"] = ""  # 清空原始缓存
+            logger.info(f"开始接收content内容: {processed_text[:50]}...")
+            return processed_text
+    else:
+        # 已经开始接收content，直接返回文本
+        # 检查是否有新的JSON响应开始，并提取新的页码
         if '"page":' in text_chunk:
-            self._extract_page_from_chunk(text_chunk)
+            try:
+                page_pattern = r'"page"\s*:\s*([^,}]+)'
+                match = re.search(page_pattern, text_chunk)
+                if match:
+                    page_value = match.group(1).strip().strip('"\'')
+                    cache_state["current_page"] = page_value
+                    logger.info(f"更新页码: {cache_state['current_page']}")
+            except Exception as e:
+                logger.warning(f"页码更新失败: {str(e)}")
         
-        # 清理JSON标记
-        cleaned_text = self._clean_json_artifacts(text_chunk)
-        
-        # 移除可能重复的content标记
+        # 清理可能的JSON结构标记
+        cleaned_text = text_chunk
         if '"content":' in cleaned_text:
             content_index = cleaned_text.find('"content":') + len('"content":')
             cleaned_text = cleaned_text[content_index:].lstrip(' "')
-            self.logger.info("移除重复的content标记")
+        
+        # 移除可能的JSON结束标记
+        if '}' in cleaned_text:
+            json_end = cleaned_text.find('}')
+            cleaned_text = cleaned_text[:json_end]
         
         return cleaned_text
     
-    def _extract_page_info(self):
-        """从原始缓冲区提取页码信息"""
-        try:
-            page_pattern = r'"page"\s*:\s*([^,}]+)'
-            match = re.search(page_pattern, self.raw_buffer)
-            if match:
-                page_value = match.group(1).strip().strip('"\'')
-                self.current_page = page_value
-                self.logger.info(f"提取到页码: {self.current_page}")
-        except Exception as e:
-            self.logger.warning(f"页码提取失败: {str(e)}")
-    
-    def _extract_page_from_chunk(self, text_chunk: str):
-        """从文本块中提取页码"""
-        try:
-            page_pattern = r'"page"\s*:\s*([^,}]+)'
-            match = re.search(page_pattern, text_chunk)
-            if match:
-                page_value = match.group(1).strip().strip('"\'')
-                if page_value != self.current_page:  # 只在页码变化时更新
-                    self.current_page = page_value
-                    self.logger.info(f"更新页码: {self.current_page}")
-        except Exception as e:
-            self.logger.warning(f"页码更新失败: {str(e)}")
-    
-    def _clean_json_artifacts(self, text: str) -> str:
-        """清理JSON结构标记"""
-        # 移除JSON结束标记
-        if '}' in text and text.strip().endswith('}'):
-            json_end = text.rfind('}')
-            text = text[:json_end]
-        
-        # 移除其他可能的JSON标记
-        text = text.replace(',"', ' ').replace('"}', '').replace('\\n', '\n')
-        
-        return text
-    
-    def add_to_buffer(self, text: str):
-        """添加文本到缓冲区"""
-        if text:
-            self.text_buffer += text
-    
-    def check_segment(self) -> Optional[str]:
-        """检查是否可以分段"""
-        if len(self.text_buffer) < self.min_segment_length:
-            return None
-        
-        # 查找最适合的分段点
-        best_split_point = -1
-        for marker in self.segment_markers:
-            marker_pos = self.text_buffer.rfind(marker)
-            if marker_pos > best_split_point:
-                best_split_point = marker_pos
-        
-        if best_split_point > 0:
-            # 分段点包含标点符号
-            split_point = best_split_point + 1
-            segment = self.text_buffer[:split_point].strip()
-            self.text_buffer = self.text_buffer[split_point:].strip()
-            self.segment_counter += 1
-            
-            self.logger.info(f"文本分段 #{self.segment_counter}: {segment[:50]}...")
-            return segment
-        
-        return None
-    
-    def get_final_segment(self) -> Optional[str]:
-        """获取最终剩余的文本段"""
-        if self.text_buffer.strip():
-            final_text = self.text_buffer.strip()
-            self.text_buffer = ""
-            self.logger.info(f"最终文本段: {final_text[:50]}...")
-            return final_text
-        return None
+    return ""
 
-# ==================== 修复的流式语音对话接口 ====================
+async def check_and_process_segment(cache_state, min_segment_length, segment_markers):
+    """检查是否需要分段，如果需要则返回分段文本"""
+    text_buffer = cache_state["text_buffer"]
+    
+    if len(text_buffer) >= min_segment_length:
+        for marker in segment_markers:
+            last_marker = text_buffer.rfind(marker)
+            if last_marker > 0:
+                process_index = last_marker + len(marker)
+                segment_text = text_buffer[:process_index]
+                cache_state["text_buffer"] = text_buffer[process_index:]
+                cache_state["segment_counter"] += 1
+                return segment_text
+    
+    return None
+
+async def process_audio_data(audio_data):
+    """统一处理音频数据转Base64"""
+    def is_already_base64(data):
+        try:
+            base64.b64decode(data)
+            return True
+        except:
+            return False
+    
+    if isinstance(audio_data, str) and is_already_base64(audio_data):
+        return audio_data
+    elif isinstance(audio_data, bytes):
+        return base64.b64encode(audio_data).decode('utf-8')
+    else:
+        # 如果是其他类型，尝试转换为bytes再编码
+        return base64.b64encode(str(audio_data).encode('utf-8')).decode('utf-8')
+
+# ==================== 优化的流式语音对话接口 ====================
 
 @router.post("/api/chat/voice/stream")
 async def voice_chat_stream(
@@ -340,7 +266,7 @@ async def voice_chat_stream(
     system_prompt: Optional[str] = None,
     session_id: Optional[str] = None
 ):
-    """流式语音对话接口（语音输入 + 流式文本和语音输出）- 修复重复问题"""
+    """流式语音对话接口（语音输入 + 流式文本和语音输出）- 优化版本"""
     managers = get_managers()
     logger = managers['logger']
     
@@ -369,11 +295,21 @@ async def voice_chat_stream(
                 "text": user_text
             }) + "\n"
             
-            # 2. 初始化流式处理器
-            processor = StreamProcessor(request_id, logger)
-            
-            # 3. LLM 流式对话
+            # 2. LLM 流式对话 - 优化缓存处理
             logger.info(f"开始 LLM 流式对话 [请求ID: {request_id}]")
+            
+            # 优化的缓存状态管理
+            cache_state = {
+                "raw_buffer": "",           # 原始JSON数据缓存
+                "text_buffer": "",          # 提取的文本内容缓存
+                "current_page": None,       # 当前页码
+                "content_started": False,   # 是否开始接收content内容
+                "segment_counter": 0        # 分段计数器
+            }
+            
+            # 分段配置
+            min_segment_length = 40
+            segment_markers = ["。", "！", "？", "；", ".", "!", "?", ";", "\n"]
             
             start_time = time.time()
             async for chunk in managers['llm_manager'].stream_chat(
@@ -388,128 +324,109 @@ async def voice_chat_stream(
                 if not text_chunk:
                     continue
                 
-                # 处理文本块
-                processed_text = processor.process_chunk(text_chunk)
-                if not processed_text:
-                    continue
+                # 处理流式数据缓存
+                processed_text = await process_stream_chunk(
+                    text_chunk, cache_state, logger, request_id
+                )
                 
-                # 添加到缓冲区
-                processor.add_to_buffer(processed_text)
-                
-                # 检查是否可以分段
-                segment = processor.check_segment()
-                if segment:
-                    # 发送文本段
-                    segment_id = f"{request_id}_seg_{processor.segment_counter}"
-                    text_response = {
-                        "type": "text",
-                        "segment_id": segment_id,
-                        "text": segment
-                    }
+                if processed_text:
+                    cache_state["text_buffer"] += processed_text
                     
-                    if processor.current_page:
-                        text_response["page"] = processor.current_page
+                    # 检查是否需要分段处理
+                    segment_text = await check_and_process_segment(
+                        cache_state, min_segment_length, segment_markers
+                    )
                     
-                    yield json.dumps(text_response) + "\n"
-                    logger.info(f"发送文本分段 [ID: {segment_id}]: {segment[:50]}...")
-                    
-                    # 生成语音
-                    try:
-                        logger.info(f"为分段文本合成语音 [长度: {len(segment)}], 内容: {segment[:30]}...")
+                    if segment_text:
+                        # 发送文本段和音频 - 修复yield问题
+                        segment_id = f"{request_id}_seg_{cache_state['segment_counter']}"
                         
-                        synthesis_result = await managers['speech_processor'].synthesize(
-                            text=segment,  # 直接使用处理后的segment，避免重复
-                            request_id=segment_id
-                        )
-                        
-                        # 处理音频数据
-                        audio_data = synthesis_result.audio_data
-                        if isinstance(audio_data, str):
-                            # 检查是否已经是Base64
-                            try:
-                                base64.b64decode(audio_data)
-                                audio_base64 = audio_data
-                            except:
-                                audio_base64 = base64.b64encode(audio_data.encode('utf-8')).decode('utf-8')
-                        elif isinstance(audio_data, bytes):
-                            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-                        else:
-                            audio_base64 = base64.b64encode(str(audio_data).encode('utf-8')).decode('utf-8')
-                        
-                        # 发送音频段
-                        audio_response = {
-                            "type": "audio",
+                        # 发送文本分段
+                        text_response = {
+                            "type": "text",
                             "segment_id": segment_id,
-                            "text": segment,
-                            "audio": audio_base64,
-                            "format": synthesis_result.format
+                            "text": segment_text
                         }
                         
-                        if processor.current_page:
-                            audio_response["page"] = processor.current_page
+                        if cache_state["current_page"]:
+                            text_response["page"] = cache_state["current_page"]
                         
-                        yield json.dumps(audio_response) + "\n"
-                        logger.info(f"发送音频分段 [ID: {segment_id}]: 音频长度 {len(audio_base64)} 字符")
+                        yield json.dumps(text_response) + "\n"
+                        logger.info(f"发送文本分段 [ID: {segment_id}]: {segment_text[:50]}...")
                         
-                    except Exception as e:
-                        logger.error(f"音频合成失败 [分段: {segment_id}]: {str(e)}")
-                        yield json.dumps({
-                            "type": "error",
-                            "segment_id": segment_id,
-                            "message": f"音频合成失败: {str(e)}"
-                        }) + "\n"
+                        # 生成并发送音频
+                        try:
+                            logger.info(f"为分段文本合成语音 [长度: {len(segment_text)}]")
+                            
+                            synthesis_result = await managers['speech_processor'].synthesize(
+                                text=segment_text,
+                                request_id=segment_id
+                            )
+                            
+                            # 处理音频数据
+                            audio_base64 = await process_audio_data(synthesis_result.audio_data)
+                            
+                            audio_response = {
+                                "type": "audio",
+                                "segment_id": segment_id,
+                                "text": segment_text,
+                                "audio": audio_base64,
+                                "format": synthesis_result.format
+                            }
+                            
+                            if cache_state["current_page"]:
+                                audio_response["page"] = cache_state["current_page"]
+                            
+                            yield json.dumps(audio_response) + "\n"
+                            logger.info(f"发送音频分段 [ID: {segment_id}]: 音频长度 {len(audio_base64)} 字符")
+                            
+                        except Exception as e:
+                            logger.error(f"音频合成失败 [分段: {segment_id}]: {str(e)}")
+                            yield json.dumps({
+                                "type": "error",
+                                "segment_id": segment_id,
+                                "message": f"音频合成失败: {str(e)}"
+                            }) + "\n"
             
-            # 4. 处理最终剩余文本
-            final_segment = processor.get_final_segment()
-            if final_segment:
+            # 处理剩余缓存内容
+            if cache_state["text_buffer"]:
+                final_text = cache_state["text_buffer"]
                 segment_id = f"{request_id}_final"
                 
                 # 发送最终文本
                 text_response = {
                     "type": "text",
                     "segment_id": segment_id,
-                    "text": final_segment
+                    "text": final_text
                 }
                 
-                if processor.current_page:
-                    text_response["page"] = processor.current_page
+                if cache_state["current_page"]:
+                    text_response["page"] = cache_state["current_page"]
                 
                 yield json.dumps(text_response) + "\n"
-                logger.info(f"发送最终文本 [ID: {segment_id}]: {final_segment[:50]}...")
+                logger.info(f"发送最终文本 [ID: {segment_id}]: {final_text[:50]}...")
                 
-                # 生成最终语音
+                # 生成最终音频
                 try:
-                    logger.info(f"为最终文本合成语音 [长度: {len(final_segment)}]")
+                    logger.info(f"为最终文本合成语音 [长度: {len(final_text)}]")
                     
                     synthesis_result = await managers['speech_processor'].synthesize(
-                        text=final_segment,
+                        text=final_text,
                         request_id=segment_id
                     )
                     
-                    # 处理音频数据
-                    audio_data = synthesis_result.audio_data
-                    if isinstance(audio_data, str):
-                        try:
-                            base64.b64decode(audio_data)
-                            audio_base64 = audio_data
-                        except:
-                            audio_base64 = base64.b64encode(audio_data.encode('utf-8')).decode('utf-8')
-                    elif isinstance(audio_data, bytes):
-                        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-                    else:
-                        audio_base64 = base64.b64encode(str(audio_data).encode('utf-8')).decode('utf-8')
+                    audio_base64 = await process_audio_data(synthesis_result.audio_data)
                     
-                    # 发送最终音频
                     audio_response = {
                         "type": "audio",
                         "segment_id": segment_id,
-                        "text": final_segment,
+                        "text": final_text,
                         "audio": audio_base64,
                         "format": synthesis_result.format
                     }
                     
-                    if processor.current_page:
-                        audio_response["page"] = processor.current_page
+                    if cache_state["current_page"]:
+                        audio_response["page"] = cache_state["current_page"]
                     
                     yield json.dumps(audio_response) + "\n"
                     logger.info(f"发送最终音频 [ID: {segment_id}]: 音频长度 {len(audio_base64)} 字符")
@@ -522,13 +439,13 @@ async def voice_chat_stream(
                         "message": f"最终音频合成失败: {str(e)}"
                     }) + "\n"
             
-            # 5. 发送完成信号
+            # 发送完成信号
             processing_time = time.time() - start_time
             yield json.dumps({
                 "type": "done",
                 "request_id": request_id,
                 "processing_time": processing_time,
-                "page": processor.current_page
+                "page": cache_state["current_page"]  # 在完成信号中也包含页码
             }) + "\n"
             
             logger.info(f"流式语音对话完成 [请求ID: {request_id}] - 总时长: {processing_time:.2f}s")
