@@ -278,22 +278,9 @@ async def voice_chat_stream(
                             
                         # 找到content标记
                         content_index = stream_generator.raw_buffer.find(content_marker) + len(content_marker)
-                        # 只保留标记后面的文本，并移除引号
-                        raw_content = stream_generator.raw_buffer[content_index:].lstrip(' "')
-                        
-                        # 移除 JSON 结束部分直到末尾
-                        json_end = raw_content.find('}')
-                        if json_end >= 0:
-                            processed_chunk = raw_content[:json_end].rstrip('"')
-                        else:
-                            processed_chunk = raw_content.rstrip('"')
-                            
-                        # 进一步清理可能的嵌套JSON
-                        json_start = processed_chunk.find('{"')
-                        if json_start >= 0:
-                            processed_chunk = processed_chunk[:json_start]
-                            
-                        logger.info(f"检测到content标记，提取内容: {processed_chunk}")
+                        # 只保留标记后面的文本
+                        processed_chunk = stream_generator.raw_buffer[content_index:].lstrip(' "')
+                        logger.info(f"检测到content标记，开始提取内容: {processed_chunk}")
                         # 设置标志，之后的文本直接进入主缓冲区
                         stream_generator.found_content_marker = True
                         # 不再需要原始缓冲区
@@ -313,62 +300,38 @@ async def voice_chat_stream(
                             # 否则跳过处理
                             continue
                 else:
-                    # 已经找到content标记，对原始文本块进行处理
-                    raw_chunk = text_chunk
+                    # 已经找到content标记，直接处理文本
+                    processed_chunk = text_chunk
                     
                     # 检查是否有新的JSON响应开始
-                    if '"content":' in raw_chunk:
+                    if '"content":' in processed_chunk:
                         logger.info("检测到新的content标记")
                         
                         # 尝试提取新的页码
                         try:
                             page_marker = '"page":'
-                            if page_marker in raw_chunk:
-                                page_start = raw_chunk.find(page_marker) + len(page_marker)
-                                page_end = raw_chunk.find(',', page_start)
+                            if page_marker in processed_chunk:
+                                page_start = processed_chunk.find(page_marker) + len(page_marker)
+                                page_end = processed_chunk.find(',', page_start)
                                 if page_end == -1:
-                                    page_end = raw_chunk.find('}', page_start)
+                                    page_end = processed_chunk.find('}', page_start)
                                 if page_end > page_start:
-                                    page_str = raw_chunk[page_start:page_end].strip()
+                                    page_str = processed_chunk[page_start:page_end].strip()
                                     stream_generator.current_page = page_str.strip(' "\'')
                                     logger.info(f"提取到新页码: {stream_generator.current_page}")
                         except:
                             # 如果提取失败也不影响主流程
                             pass
-                            
-                        # 发现新的content标记，提取新内容
-                        content_index = raw_chunk.find('"content":') + len('"content":')
-                        raw_content = raw_chunk[content_index:].lstrip(' "')
-                        
-                        # 移除 JSON 结束部分
-                        json_end = raw_content.find('}')
-                        if json_end >= 0:
-                            processed_chunk = raw_content[:json_end].rstrip('"')
-                        else:
-                            processed_chunk = raw_content.rstrip('"')
-                            
-                        # 清理可能的嵌套JSON
-                        json_start = processed_chunk.find('{"')
-                        if json_start >= 0:
-                            processed_chunk = processed_chunk[:json_start]
-                            
-                        # 清空之前的缓冲区，避免混合内容
-                        text_buffer = ""
-                        logger.info(f"提取新内容: {processed_chunk}")
-                    else:
-                        # 对普通文本块进行清理
-                        processed_chunk = raw_chunk
-                        
-                        # 清理可能的JSON字符串
-                        json_start = processed_chunk.find('{"')
-                        if json_start >= 0:
-                            processed_chunk = processed_chunk[:json_start]
-                            
-                        # 清理结束括号和引号
+                    
+                    # 尝试移除JSON结束标记
+                    try:
                         json_end = processed_chunk.find('}')
                         if json_end >= 0:
                             processed_chunk = processed_chunk[:json_end]
-                        processed_chunk = processed_chunk.rstrip('"')
+                            logger.info("移除JSON结束标记")
+                    except:
+                        # 如果移除失败也不影响主流程
+                        pass
                 
                 # 添加到文本缓冲区
                 text_buffer += processed_chunk
@@ -402,18 +365,7 @@ async def voice_chat_stream(
                     if hasattr(stream_generator, 'current_page') and stream_generator.current_page is not None:
                         response_data["page"] = stream_generator.current_page
                     
-                    # 记录发送到前端的响应
-                    logger.info(f"发送文本响应到前端: {response_data}")
-                    response_json = json.dumps(response_data) + "\n"
-                    logger.info(f"文本JSON长度: {len(response_json)}")
-                    
-                    try:
-                        yield response_json
-                        logger.info("文本响应已发送")
-                    except Exception as e:
-                        logger.error(f"发送文本响应失败: {str(e)}")
-                        # 尝试恢复连接
-                        yield json.dumps({"type": "reconnect"}) + "\n"
+                    yield json.dumps(response_data) + "\n"
                     
                     # 3. 生成此段的语音
                     logger.info(f"为分段文本合成语音 [长度: {len(segment_text)}], 内容: {segment_text}")
@@ -453,19 +405,8 @@ async def voice_chat_stream(
                         # 添加页码信息
                         if hasattr(stream_generator, 'current_page') and stream_generator.current_page is not None:
                             response_data["page"] = stream_generator.current_page
-                        
-                        # 记录发送到前端的音频响应
-                        logger.info(f"发送音频响应到前端，文本长度: {len(response_data['text'])}, 音频长度: {len(response_data['audio'])[:20]}...")
-                        response_json = json.dumps(response_data) + "\n"
-                        logger.info(f"音频JSON长度: {len(response_json)}")
-                        
-                        try:
-                            yield response_json
-                            logger.info("音频响应已发送")
-                        except Exception as e:
-                            logger.error(f"发送音频响应失败: {str(e)}")
-                            # 尝试恢复连接
-                            yield json.dumps({"type": "reconnect"}) + "\n"
+                            
+                        yield json.dumps(response_data) + "\n"
                     except Exception as e:
                         logger.error(f"音频合成失败: {str(e)}")
                         yield json.dumps({
@@ -486,18 +427,7 @@ async def voice_chat_stream(
                 if hasattr(stream_generator, 'current_page') and stream_generator.current_page is not None:
                     response_data["page"] = stream_generator.current_page
                     
-                # 记录发送到前端的响应
-                logger.info(f"发送文本响应到前端: {response_data}")
-                response_json = json.dumps(response_data) + "\n"
-                logger.info(f"文本JSON长度: {len(response_json)}")
-                
-                try:
-                    yield response_json
-                    logger.info("文本响应已发送")
-                except Exception as e:
-                    logger.error(f"发送文本响应失败: {str(e)}")
-                    # 尝试恢复连接
-                    yield json.dumps({"type": "reconnect"}) + "\n"
+                yield json.dumps(response_data) + "\n"
                 
                 # 为最后一段文本合成语音
                 try:
@@ -528,18 +458,7 @@ async def voice_chat_stream(
                     if hasattr(stream_generator, 'current_page') and stream_generator.current_page is not None:
                         response_data["page"] = stream_generator.current_page
                         
-                    # 记录发送到前端的音频响应
-                    logger.info(f"发送音频响应到前端，文本长度: {len(response_data['text'])}, 音频长度: {len(response_data['audio'])[:20]}...")
-                    response_json = json.dumps(response_data) + "\n"
-                    logger.info(f"音频JSON长度: {len(response_json)}")
-                    
-                    try:
-                        yield response_json
-                        logger.info("音频响应已发送")
-                    except Exception as e:
-                        logger.error(f"发送音频响应失败: {str(e)}")
-                        # 尝试恢复连接
-                        yield json.dumps({"type": "reconnect"}) + "\n"
+                    yield json.dumps(response_data) + "\n"
                 except Exception as e:
                     logger.error(f"最终音频合成失败: {str(e)}")
                     yield json.dumps({
@@ -567,10 +486,5 @@ async def voice_chat_stream(
     # 返回流式响应
     return StreamingResponse(
         stream_generator(),
-        media_type="application/x-ndjson",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"  # 禁用Nginx缓冲
-        }
+        media_type="application/x-ndjson"
     )
