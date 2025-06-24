@@ -261,20 +261,21 @@ async def voice_chat_stream(
                     content_marker = '"content":'
                     if content_marker in stream_generator.raw_buffer:
                         # 尝试提取页码
-                        page_marker = '"page":'
-                        if page_marker in stream_generator.raw_buffer:
-                            page_start = stream_generator.raw_buffer.find(page_marker) + len(page_marker)
-                            page_end = stream_generator.raw_buffer.find(',', page_start)
-                            if page_end == -1:  # 如果没有找到逗号，尝试找花括号
-                                page_end = stream_generator.raw_buffer.find('}', page_start)
-                            if page_end > page_start:
-                                try:
-                                    page_value = stream_generator.raw_buffer[page_start:page_end].strip(' "')
-                                    stream_generator.current_page = page_value
+                        try:
+                            page_marker = '"page":'
+                            if page_marker in stream_generator.raw_buffer:
+                                page_start = stream_generator.raw_buffer.find(page_marker) + len(page_marker)
+                                page_end = stream_generator.raw_buffer.find(',', page_start)
+                                if page_end == -1:
+                                    page_end = stream_generator.raw_buffer.find('}', page_start)
+                                if page_end > page_start:
+                                    page_str = stream_generator.raw_buffer[page_start:page_end].strip()
+                                    stream_generator.current_page = page_str.strip(' "\'')
                                     logger.info(f"提取到页码: {stream_generator.current_page}")
-                                except Exception as e:
-                                    logger.error(f"解析页码失败: {str(e)}")
-                        
+                        except:
+                            # 如果提取失败也不影响主流程
+                            pass
+                            
                         # 找到content标记
                         content_index = stream_generator.raw_buffer.find(content_marker) + len(content_marker)
                         # 只保留标记后面的文本
@@ -300,39 +301,37 @@ async def voice_chat_stream(
                             continue
                 else:
                     # 已经找到content标记，直接处理文本
-                    # 检查是否有完整JSON结构（新的输出可能开始）
-                    if '"content":' in text_chunk:
-                        # 尝试提取页码
-                        page_marker = '"page":'
-                        if page_marker in text_chunk:
-                            page_start = text_chunk.find(page_marker) + len(page_marker)
-                            page_end = text_chunk.find(',', page_start)
-                            if page_end == -1:  # 如果没有找到逗号，尝试找花括号
-                                page_end = text_chunk.find('}', page_start)
-                            if page_end > page_start:
-                                try:
-                                    page_value = text_chunk[page_start:page_end].strip(' "')
-                                    stream_generator.current_page = page_value
-                                    logger.info(f"提取到后续页码: {stream_generator.current_page}")
-                                except Exception as e:
-                                    logger.error(f"解析后续页码失败: {str(e)}")
-                        
-                        # 发现新的content标记，丢弃之前的所有内容
-                        logger.info("检测到新的content标记，可能是新的JSON响应")
-                        content_index = text_chunk.find('"content":') + len('"content":')
-                        processed_chunk = text_chunk[content_index:].lstrip(' "')
-                        # 清空之前的缓冲区
-                        text_buffer = ""
-                    else:
-                        # 普通文本块处理
-                        processed_chunk = text_chunk
+                    processed_chunk = text_chunk
                     
-                    # 检查并移除末尾的花括号和后续可能的JSON
-                    json_end = processed_chunk.find('}')
-                    if json_end >= 0:
-                        # 只保留花括号之前的内容
-                        processed_chunk = processed_chunk[:json_end]
-                        logger.info(f"移除文本中的JSON结束标记及之后内容: {processed_chunk}")
+                    # 检查是否有新的JSON响应开始
+                    if '"content":' in processed_chunk:
+                        logger.info("检测到新的content标记")
+                        
+                        # 尝试提取新的页码
+                        try:
+                            page_marker = '"page":'
+                            if page_marker in processed_chunk:
+                                page_start = processed_chunk.find(page_marker) + len(page_marker)
+                                page_end = processed_chunk.find(',', page_start)
+                                if page_end == -1:
+                                    page_end = processed_chunk.find('}', page_start)
+                                if page_end > page_start:
+                                    page_str = processed_chunk[page_start:page_end].strip()
+                                    stream_generator.current_page = page_str.strip(' "\'')
+                                    logger.info(f"提取到新页码: {stream_generator.current_page}")
+                        except:
+                            # 如果提取失败也不影响主流程
+                            pass
+                    
+                    # 尝试移除JSON结束标记
+                    try:
+                        json_end = processed_chunk.find('}')
+                        if json_end >= 0:
+                            processed_chunk = processed_chunk[:json_end]
+                            logger.info("移除JSON结束标记")
+                    except:
+                        # 如果移除失败也不影响主流程
+                        pass
                 
                 # 添加到文本缓冲区
                 text_buffer += processed_chunk
@@ -357,15 +356,15 @@ async def voice_chat_stream(
                     
                     # 发送文本分段
                     response_data = {
-                        "type": "text",
-                        "segment_id": f"{request_id}_{int(time.time())}",
+                        "type": "text", 
+                        "segment_id": f"{request_id}_{int(time.time())}", 
                         "text": segment_text
                     }
                     
-                    # 添加页码信息（如果有）
+                    # 添加页码信息
                     if hasattr(stream_generator, 'current_page') and stream_generator.current_page is not None:
                         response_data["page"] = stream_generator.current_page
-                        
+                    
                     yield json.dumps(response_data) + "\n"
                     
                     # 3. 生成此段的语音
@@ -403,7 +402,7 @@ async def voice_chat_stream(
                             "format": synthesis_result.format
                         }
                         
-                        # 添加页码信息（如果有）
+                        # 添加页码信息
                         if hasattr(stream_generator, 'current_page') and stream_generator.current_page is not None:
                             response_data["page"] = stream_generator.current_page
                             
@@ -424,7 +423,7 @@ async def voice_chat_stream(
                     "text": text_buffer
                 }
                 
-                # 添加页码信息（如果有）
+                # 添加页码信息
                 if hasattr(stream_generator, 'current_page') and stream_generator.current_page is not None:
                     response_data["page"] = stream_generator.current_page
                     
@@ -455,7 +454,7 @@ async def voice_chat_stream(
                         "format": synthesis_result.format
                     }
                     
-                    # 添加页码信息（如果有）
+                    # 添加页码信息
                     if hasattr(stream_generator, 'current_page') and stream_generator.current_page is not None:
                         response_data["page"] = stream_generator.current_page
                         
