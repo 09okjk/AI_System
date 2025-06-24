@@ -177,16 +177,17 @@ class StreamProcessor:
         self.logger = logger
         
         # 状态管理
-        self.raw_buffer = ""  # 原始JSON数据缓存
-        self.text_buffer = ""  # 已提取的文本内容缓存
-        self.content_started = False  # 是否开始接收内容
-        self.current_page = None  # 当前页码
-        self.segment_counter = 0  # 分段计数器
+        self.raw_buffer = ""
+        self.text_buffer = ""
+        self.content_started = False
+        self.current_page = None
+        self.segment_counter = 0
+        self.processed_chunks = set()  # 添加去重集合
         
         # 配置
         self.min_segment_length = 40
         self.segment_markers = ["。", "！", "？", "；", ".", "!", "?", ";", "\n"]
-    
+
     def process_chunk(self, text_chunk: str) -> str:
         """
         处理单个文本块，返回可用于合成的文本
@@ -206,6 +207,16 @@ class StreamProcessor:
     
     def _check_content_start(self) -> str:
         """检查是否开始接收内容"""
+
+        if not self.raw_buffer or self.raw_buffer in self.processed_chunks:
+            return ""
+        
+        # 添加到已处理集合
+        chunk_hash = hash(self.raw_buffer)
+        if chunk_hash in self.processed_chunks:
+            return ""
+        self.processed_chunks.add(chunk_hash)
+  
         content_marker = '"content":'
         
         if content_marker not in self.raw_buffer:
