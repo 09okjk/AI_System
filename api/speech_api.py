@@ -174,6 +174,276 @@ async def voice_chat_stream(
     system_prompt: Optional[str] = None,
     session_id: Optional[str] = None
 ):
+    """流式语音对话接口（语音输入 + 流式文本和语音输出）- 优化版本"""
+    managers = get_managers()
+    logger = managers['logger']
+    
+    request_id = generate_response_id()
+    logger.info(f"开始流式语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
+    
+    async def stream_generator():
+        try:
+            # 1. 语音识别
+            audio_data = await audio_file.read()
+            logger.info(f"执行语音识别 [请求ID: {request_id}]")
+            
+            recognition_result = await managers['speech_processor'].recognize(
+                audio_data=audio_data,
+                request_id=request_id
+            )
+            
+            user_text = recognition_result.text
+            user_text = re.sub(r'<\s*\|\s*[^|]+\s*\|\s*>', '', user_text).strip()
+            logger.info(f"识别结果 [请求ID: {request_id}]: {user_text}")
+            
+            # 发送识别结果
+            yield json.dumps({
+                "type": "recognition",
+                "request_id": request_id,
+                "text": user_text
+            }) + "\n"
+            
+            # 2. LLM 流式对话 - 优化缓存处理
+            logger.info(f"开始 LLM 流式对话 [请求ID: {request_id}]")
+            
+            # 优化的缓存状态管理
+            cache_state = {
+                "raw_buffer": "",           # 原始JSON数据缓存
+                "text_buffer": "",          # 提取的文本内容缓存
+                "current_page": None,       # 当前页码
+                "content_started": False,   # 是否开始接收content内容
+                "segment_counter": 0        # 分段计数器
+            }
+            
+            # 分段配置
+            min_segment_length = 40
+            segment_markers = ["。", "！", "？", "；", ".", "!", "?", ";", "\n"]
+            
+            start_time = time.time()
+            async for chunk in managers['llm_manager'].stream_chat(
+                model_name=llm_model,
+                message=user_text,
+                system_prompt=system_prompt,
+                session_id=session_id,
+                request_id=request_id
+            ):
+                # 获取文本块
+                text_chunk = chunk.get("content", "") if isinstance(chunk, dict) else chunk
+                if not text_chunk:
+                    continue
+                
+                # 处理流式数据缓存
+                processed_text = await process_stream_chunk(
+                    text_chunk, cache_state, logger, request_id
+                )
+                
+                if processed_text:
+                    cache_state["text_buffer"] += processed_text
+                    
+                    # 检查是否需要分段处理
+                    segment_text = await check_and_process_segment(
+                        cache_state, min_segment_length, segment_markers
+                    )
+                    
+                    if segment_text:
+                        # 发送文本段和音频
+                        await send_text_and_audio_segment(
+                            segment_text, cache_state, request_id, managers, logger
+                        )
+            
+            # 处理剩余缓存内容
+            if cache_state["text_buffer"]:
+                await send_final_segment(
+                    cache_state, request_id, managers, logger
+                )
+            
+            # 发送完成信号
+            processing_time = time.time() - start_time
+            yield json.dumps({
+                "type": "done",
+                "request_id": request_id,
+                "processing_time": processing_time,
+                "page": cache_state["current_page"]  # 在完成信号中也包含页码
+            }) + "\n"
+            
+            logger.info(f"流式语音对话完成 [请求ID: {request_id}] - 总时长: {processing_time:.2f}s")
+            
+        except Exception as e:
+            logger.error(f"流式语音对话失败 [请求ID: {request_id}]: {str(e)}")
+            yield json.dumps({
+                "type": "error",
+                "message": str(e)
+            }) + "\n"
+    
+    return StreamingResponse(
+        stream_generator(),
+        media_type="application/x-ndjson"
+    )
+
+# 辅助函数 - 处理流式数据块
+async def process_stream_chunk(text_chunk, cache_state, logger, request_id):
+    """处理单个流式数据块，提取page和content信息"""
+    cache_state["raw_buffer"] += text_chunk
+    
+    if not cache_state["content_started"]:
+        # 尝试提取page属性
+        if '"page":' in cache_state["raw_buffer"]:
+            try:
+                # 更稳健的JSON解析方式
+                import re
+                page_pattern = r'"page"\s*:\s*([^,}]+)'
+                match = re.search(page_pattern, cache_state["raw_buffer"])
+                if match:
+                    page_value = match.group(1).strip().strip('"\'')
+                    cache_state["current_page"] = page_value
+                    logger.info(f"提取到页码: {cache_state['current_page']}")
+            except Exception as e:
+                logger.warning(f"页码提取失败: {str(e)}")
+        
+        # 检查是否开始接收content
+        if '"content":' in cache_state["raw_buffer"]:
+            content_index = cache_state["raw_buffer"].find('"content":') + len('"content":')
+            processed_text = cache_state["raw_buffer"][content_index:].lstrip(' "')
+            cache_state["content_started"] = True
+            cache_state["raw_buffer"] = ""  # 清空原始缓存
+            logger.info(f"开始接收content内容: {processed_text[:50]}...")
+            return processed_text
+    else:
+        # 已经开始接收content，直接返回文本
+        return text_chunk
+    
+    return ""
+
+# 辅助函数 - 检查并处理分段
+async def check_and_process_segment(cache_state, min_segment_length, segment_markers):
+    """检查是否需要分段，如果需要则返回分段文本"""
+    text_buffer = cache_state["text_buffer"]
+    
+    if len(text_buffer) >= min_segment_length:
+        for marker in segment_markers:
+            last_marker = text_buffer.rfind(marker)
+            if last_marker > 0:
+                process_index = last_marker + len(marker)
+                segment_text = text_buffer[:process_index]
+                cache_state["text_buffer"] = text_buffer[process_index:]
+                cache_state["segment_counter"] += 1
+                return segment_text
+    
+    return None
+
+# 辅助函数 - 发送文本和音频分段
+async def send_text_and_audio_segment(segment_text, cache_state, request_id, managers, logger):
+    """发送文本分段和对应的音频"""
+    segment_id = f"{request_id}_seg_{cache_state['segment_counter']}"
+    
+    # 发送文本分段
+    text_response = {
+        "type": "text",
+        "segment_id": segment_id,
+        "text": segment_text
+    }
+    
+    if cache_state["current_page"]:
+        text_response["page"] = cache_state["current_page"]
+    
+    yield json.dumps(text_response) + "\n"
+    
+    # 生成并发送音频
+    try:
+        synthesis_result = await managers['speech_processor'].synthesize(
+            text=segment_text,
+            request_id=segment_id
+        )
+        
+        # 处理音频数据
+        audio_base64 = await process_audio_data(synthesis_result.audio_data)
+        
+        audio_response = {
+            "type": "audio",
+            "segment_id": segment_id,
+            "text": segment_text,
+            "audio": audio_base64,
+            "format": synthesis_result.format
+        }
+        
+        if cache_state["current_page"]:
+            audio_response["page"] = cache_state["current_page"]
+        
+        yield json.dumps(audio_response) + "\n"
+        
+    except Exception as e:
+        logger.error(f"音频合成失败 [分段: {segment_id}]: {str(e)}")
+        yield json.dumps({
+            "type": "error",
+            "segment_id": segment_id,
+            "message": f"音频合成失败: {str(e)}"
+        }) + "\n"
+
+# 辅助函数 - 处理音频数据
+async def process_audio_data(audio_data):
+    """统一处理音频数据转Base64"""
+    def is_already_base64(data):
+        try:
+            base64.b64decode(data)
+            return True
+        except:
+            return False
+    
+    if isinstance(audio_data, str) and is_already_base64(audio_data):
+        return audio_data
+    elif isinstance(audio_data, bytes):
+        return base64.b64encode(audio_data).decode('utf-8')
+    else:
+        # 如果是其他类型，尝试转换为bytes再编码
+        return base64.b64encode(str(audio_data).encode('utf-8')).decode('utf-8')
+
+# 辅助函数 - 发送最终分段
+async def send_final_segment(cache_state, request_id, managers, logger):
+    """处理并发送最后剩余的文本内容"""
+    final_text = cache_state["text_buffer"]
+    segment_id = f"{request_id}_final"
+    
+    # 发送最终文本
+    text_response = {
+        "type": "text",
+        "segment_id": segment_id,
+        "text": final_text
+    }
+    
+    if cache_state["current_page"]:
+        text_response["page"] = cache_state["current_page"]
+    
+    yield json.dumps(text_response) + "\n"
+    
+    # 生成最终音频
+    try:
+        synthesis_result = await managers['speech_processor'].synthesize(
+            text=final_text,
+            request_id=segment_id
+        )
+        
+        audio_base64 = await process_audio_data(synthesis_result.audio_data)
+        
+        audio_response = {
+            "type": "audio",
+            "segment_id": segment_id,
+            "text": final_text,
+            "audio": audio_base64,
+            "format": synthesis_result.format
+        }
+        
+        if cache_state["current_page"]:
+            audio_response["page"] = cache_state["current_page"]
+        
+        yield json.dumps(audio_response) + "\n"
+        
+    except Exception as e:
+        logger.error(f"最终音频合成失败: {str(e)}")
+        yield json.dumps({
+            "type": "error",
+            "segment_id": segment_id,
+            "message": f"最终音频合成失败: {str(e)}"
+        }) + "\n"
     """流式语音对话接口（语音输入 + 流式文本和语音输出）"""
     managers = get_managers()
     logger = managers['logger']
