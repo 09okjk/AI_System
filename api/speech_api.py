@@ -1,9 +1,9 @@
 """
-语音处理相关接口模块
+语音处理相关接口模块 - 修复版本
 """
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
-from starlette.responses import StreamingResponse
+from fastapi.responses import StreamingResponse
 from typing import Optional
 import re
 from src.models import (
@@ -14,6 +14,7 @@ from src.utils import generate_response_id
 import json
 import time
 import base64
+import asyncio
 
 router = APIRouter()
 
@@ -257,7 +258,7 @@ async def process_audio_data(audio_data):
         # 如果是其他类型，尝试转换为bytes再编码
         return base64.b64encode(str(audio_data).encode('utf-8')).decode('utf-8')
 
-# ==================== 优化的流式语音对话接口 ====================
+# ==================== 修复的流式语音对话接口 ====================
 
 @router.post("/api/chat/voice/stream")
 async def voice_chat_stream(
@@ -266,7 +267,7 @@ async def voice_chat_stream(
     system_prompt: Optional[str] = None,
     session_id: Optional[str] = None
 ):
-    """流式语音对话接口（语音输入 + 流式文本和语音输出）- 优化版本"""
+    """流式语音对话接口（语音输入 + 流式文本和语音输出）- 修复版本"""
     managers = get_managers()
     logger = managers['logger']
     
@@ -275,6 +276,16 @@ async def voice_chat_stream(
     
     async def stream_generator():
         try:
+            # 发送开始标记 - 立即发送以测试连接
+            yield "data: " + json.dumps({
+                "type": "start",
+                "request_id": request_id,
+                "timestamp": time.time()
+            }) + "\n\n"
+            
+            # 强制刷新缓冲区
+            await asyncio.sleep(0.01)
+            
             # 1. 语音识别
             audio_data = await audio_file.read()
             logger.info(f"执行语音识别 [请求ID: {request_id}]")
@@ -289,11 +300,16 @@ async def voice_chat_stream(
             logger.info(f"识别结果 [请求ID: {request_id}]: {user_text}")
             
             # 发送识别结果
-            yield json.dumps({
+            recognition_data = json.dumps({
                 "type": "recognition",
                 "request_id": request_id,
                 "text": user_text
-            }) + "\n"
+            })
+            yield "data: " + recognition_data + "\n\n"
+            logger.info(f"发送识别结果: {recognition_data}")
+            
+            # 强制刷新
+            await asyncio.sleep(0.01)
             
             # 2. LLM 流式对话 - 优化缓存处理
             logger.info(f"开始 LLM 流式对话 [请求ID: {request_id}]")
@@ -351,8 +367,12 @@ async def voice_chat_stream(
                         if cache_state["current_page"]:
                             text_response["page"] = cache_state["current_page"]
                         
-                        yield json.dumps(text_response) + "\n"
+                        text_data = json.dumps(text_response)
+                        yield "data: " + text_data + "\n\n"
                         logger.info(f"发送文本分段 [ID: {segment_id}]: {segment_text[:50]}...")
+                        
+                        # 强制刷新
+                        await asyncio.sleep(0.01)
                         
                         # 生成并发送音频
                         try:
@@ -377,16 +397,21 @@ async def voice_chat_stream(
                             if cache_state["current_page"]:
                                 audio_response["page"] = cache_state["current_page"]
                             
-                            yield json.dumps(audio_response) + "\n"
+                            audio_data = json.dumps(audio_response)
+                            yield "data: " + audio_data + "\n\n"
                             logger.info(f"发送音频分段 [ID: {segment_id}]: 音频长度 {len(audio_base64)} 字符")
+                            
+                            # 强制刷新
+                            await asyncio.sleep(0.01)
                             
                         except Exception as e:
                             logger.error(f"音频合成失败 [分段: {segment_id}]: {str(e)}")
-                            yield json.dumps({
+                            error_data = json.dumps({
                                 "type": "error",
                                 "segment_id": segment_id,
                                 "message": f"音频合成失败: {str(e)}"
-                            }) + "\n"
+                            })
+                            yield "data: " + error_data + "\n\n"
             
             # 处理剩余缓存内容
             if cache_state["text_buffer"]:
@@ -403,8 +428,12 @@ async def voice_chat_stream(
                 if cache_state["current_page"]:
                     text_response["page"] = cache_state["current_page"]
                 
-                yield json.dumps(text_response) + "\n"
+                text_data = json.dumps(text_response)
+                yield "data: " + text_data + "\n\n"
                 logger.info(f"发送最终文本 [ID: {segment_id}]: {final_text[:50]}...")
+                
+                # 强制刷新
+                await asyncio.sleep(0.01)
                 
                 # 生成最终音频
                 try:
@@ -428,36 +457,49 @@ async def voice_chat_stream(
                     if cache_state["current_page"]:
                         audio_response["page"] = cache_state["current_page"]
                     
-                    yield json.dumps(audio_response) + "\n"
+                    audio_data = json.dumps(audio_response)
+                    yield "data: " + audio_data + "\n\n"
                     logger.info(f"发送最终音频 [ID: {segment_id}]: 音频长度 {len(audio_base64)} 字符")
+                    
+                    # 强制刷新
+                    await asyncio.sleep(0.01)
                     
                 except Exception as e:
                     logger.error(f"最终音频合成失败: {str(e)}")
-                    yield json.dumps({
+                    error_data = json.dumps({
                         "type": "error",
                         "segment_id": segment_id,
                         "message": f"最终音频合成失败: {str(e)}"
-                    }) + "\n"
+                    })
+                    yield "data: " + error_data + "\n\n"
             
             # 发送完成信号
             processing_time = time.time() - start_time
-            yield json.dumps({
+            done_data = json.dumps({
                 "type": "done",
                 "request_id": request_id,
                 "processing_time": processing_time,
                 "page": cache_state["current_page"]  # 在完成信号中也包含页码
-            }) + "\n"
+            })
+            yield "data: " + done_data + "\n\n"
             
             logger.info(f"流式语音对话完成 [请求ID: {request_id}] - 总时长: {processing_time:.2f}s")
             
         except Exception as e:
             logger.error(f"流式语音对话失败 [请求ID: {request_id}]: {str(e)}")
-            yield json.dumps({
+            error_data = json.dumps({
                 "type": "error",
                 "message": str(e)
-            }) + "\n"
+            })
+            yield "data: " + error_data + "\n\n"
     
+    # 使用Server-Sent Events格式
     return StreamingResponse(
         stream_generator(),
-        media_type="application/x-ndjson"
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # 禁用nginx缓冲
+        }
     )
