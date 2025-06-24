@@ -232,13 +232,24 @@ async def voice_chat_stream(
                 if not text_chunk:
                     continue
                 
-                logger.info(f"LLM 流式对话响应 [请求ID: {request_id}], 响应内容: {text_chunk}")
+                # logger.info(f"LLM 流式对话响应 [请求ID: {request_id}], 响应内容: {text_chunk}")
 
                 # 初始化状态跟踪变量
                 if not hasattr(stream_generator, 'found_content_marker'):
                     stream_generator.found_content_marker = False
                     stream_generator.raw_buffer = ""
+                    # 添加计数器，避免无限等待
+                    stream_generator.chunks_processed = 0
+
+                # 检查是否超过一定数量的块还未找到标记，如果是则放弃等待
+                if not stream_generator.found_content_marker:
+                    stream_generator.chunks_processed += 1
+                    # 如果处理了10个块还没找到标记，放弃等待直接处理
+                    if stream_generator.chunks_processed > 10:
+                        logger.warning(f"已处理{stream_generator.chunks_processed}个文本块但未找到content标记，将直接处理文本")
+                        stream_generator.found_content_marker = True
                 
+                processed_chunk = ""
                 # 处理文本块
                 if not stream_generator.found_content_marker:
                     # 在发现content标记前，先累积到原始缓冲区
@@ -250,24 +261,32 @@ async def voice_chat_stream(
                         # 找到content标记
                         content_index = stream_generator.raw_buffer.find(content_marker) + len(content_marker)
                         # 只保留标记后面的文本
-                        text_buffer = stream_generator.raw_buffer[content_index:].lstrip(' "')
-                        logger.info(f"检测到content标记，开始提取内容: {text_buffer}")
+                        processed_chunk = stream_generator.raw_buffer[content_index:].lstrip(' "')
+                        logger.info(f"检测到content标记，开始提取内容: {processed_chunk}")
                         # 设置标志，之后的文本直接进入主缓冲区
                         stream_generator.found_content_marker = True
                         # 不再需要原始缓冲区
                         stream_generator.raw_buffer = ""
                     else:
-                        # 未找到content标记，继续等待
+                        # 未找到content标记，跳过当前块
                         logger.info("等待content标记...")
-                        continue  # 跳过处理，继续接收下一块
+                        # 但不影响已经缓存的处理
+                        if text_buffer:
+                            # 如果有待处理的缓冲，继续处理它
+                            processed_chunk = ""
+                        else:
+                            # 否则跳过处理
+                            continue
                 else:
                     # 已经找到content标记，直接处理文本
                     # 检查并移除末尾的"}"
-                    clean_chunk = text_chunk
-                    if clean_chunk.endswith('}'):
-                        clean_chunk = clean_chunk[:-1]
-                        logger.info(f"移除文本末尾的花括号: {clean_chunk}")
-                    text_buffer += clean_chunk
+                    processed_chunk = text_chunk
+                    if processed_chunk.endswith('}'):
+                        processed_chunk = processed_chunk[:-1]
+                        logger.info(f"移除文本末尾的花括号: {processed_chunk}")
+                
+                # 添加到文本缓冲区
+                text_buffer += processed_chunk
                 
                 # 检查是否可以分段处理
                 should_process = False
