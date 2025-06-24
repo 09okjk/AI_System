@@ -240,6 +240,8 @@ async def voice_chat_stream(
                     stream_generator.raw_buffer = ""
                     # 添加计数器，避免无限等待
                     stream_generator.chunks_processed = 0
+                    # 添加页码记录
+                    stream_generator.current_page = None
 
                 # 检查是否超过一定数量的块还未找到标记，如果是则放弃等待
                 if not stream_generator.found_content_marker:
@@ -258,6 +260,21 @@ async def voice_chat_stream(
                     # 检查是否包含了content标记
                     content_marker = '"content":'
                     if content_marker in stream_generator.raw_buffer:
+                        # 尝试提取页码
+                        page_marker = '"page":'
+                        if page_marker in stream_generator.raw_buffer:
+                            page_start = stream_generator.raw_buffer.find(page_marker) + len(page_marker)
+                            page_end = stream_generator.raw_buffer.find(',', page_start)
+                            if page_end == -1:  # 如果没有找到逗号，尝试找花括号
+                                page_end = stream_generator.raw_buffer.find('}', page_start)
+                            if page_end > page_start:
+                                try:
+                                    page_value = stream_generator.raw_buffer[page_start:page_end].strip(' "')
+                                    stream_generator.current_page = page_value
+                                    logger.info(f"提取到页码: {stream_generator.current_page}")
+                                except Exception as e:
+                                    logger.error(f"解析页码失败: {str(e)}")
+                        
                         # 找到content标记
                         content_index = stream_generator.raw_buffer.find(content_marker) + len(content_marker)
                         # 只保留标记后面的文本
@@ -285,6 +302,21 @@ async def voice_chat_stream(
                     # 已经找到content标记，直接处理文本
                     # 检查是否有完整JSON结构（新的输出可能开始）
                     if '"content":' in text_chunk:
+                        # 尝试提取页码
+                        page_marker = '"page":'
+                        if page_marker in text_chunk:
+                            page_start = text_chunk.find(page_marker) + len(page_marker)
+                            page_end = text_chunk.find(',', page_start)
+                            if page_end == -1:  # 如果没有找到逗号，尝试找花括号
+                                page_end = text_chunk.find('}', page_start)
+                            if page_end > page_start:
+                                try:
+                                    page_value = text_chunk[page_start:page_end].strip(' "')
+                                    stream_generator.current_page = page_value
+                                    logger.info(f"提取到后续页码: {stream_generator.current_page}")
+                                except Exception as e:
+                                    logger.error(f"解析后续页码失败: {str(e)}")
+                        
                         # 发现新的content标记，丢弃之前的所有内容
                         logger.info("检测到新的content标记，可能是新的JSON响应")
                         content_index = text_chunk.find('"content":') + len('"content":')
@@ -324,11 +356,17 @@ async def voice_chat_stream(
                     text_buffer = text_buffer[process_index:]
                     
                     # 发送文本分段
-                    yield json.dumps({
+                    response_data = {
                         "type": "text",
                         "segment_id": f"{request_id}_{int(time.time())}",
                         "text": segment_text
-                    }) + "\n"
+                    }
+                    
+                    # 添加页码信息（如果有）
+                    if hasattr(stream_generator, 'current_page') and stream_generator.current_page is not None:
+                        response_data["page"] = stream_generator.current_page
+                        
+                    yield json.dumps(response_data) + "\n"
                     
                     # 3. 生成此段的语音
                     logger.info(f"为分段文本合成语音 [长度: {len(segment_text)}], 内容: {segment_text}")
@@ -357,13 +395,19 @@ async def voice_chat_stream(
                             audio_base64 = base64.b64encode(audio_data).decode('utf-8')
                         
                         # 发送音频段
-                        yield json.dumps({
+                        response_data = {
                             "type": "audio",
                             "segment_id": f"{request_id}_{int(time.time())}",
                             "text": segment_text,
                             "audio": audio_base64,
                             "format": synthesis_result.format
-                        }) + "\n"
+                        }
+                        
+                        # 添加页码信息（如果有）
+                        if hasattr(stream_generator, 'current_page') and stream_generator.current_page is not None:
+                            response_data["page"] = stream_generator.current_page
+                            
+                        yield json.dumps(response_data) + "\n"
                     except Exception as e:
                         logger.error(f"音频合成失败: {str(e)}")
                         yield json.dumps({
@@ -374,11 +418,17 @@ async def voice_chat_stream(
             # 处理剩余的文本缓冲区
             if text_buffer:
                 # 发送最后一段文本
-                yield json.dumps({
+                response_data = {
                     "type": "text",
                     "segment_id": f"{request_id}_final",
                     "text": text_buffer
-                }) + "\n"
+                }
+                
+                # 添加页码信息（如果有）
+                if hasattr(stream_generator, 'current_page') and stream_generator.current_page is not None:
+                    response_data["page"] = stream_generator.current_page
+                    
+                yield json.dumps(response_data) + "\n"
                 
                 # 为最后一段文本合成语音
                 try:
@@ -397,13 +447,19 @@ async def voice_chat_stream(
                     audio_base64 = base64.b64encode(audio_data).decode('utf-8')
                     
                     # 发送最后一段音频
-                    yield json.dumps({
+                    response_data = {
                         "type": "audio",
                         "segment_id": f"{request_id}_final",
                         "text": text_buffer,
                         "audio": audio_base64,
                         "format": synthesis_result.format
-                    }) + "\n"
+                    }
+                    
+                    # 添加页码信息（如果有）
+                    if hasattr(stream_generator, 'current_page') and stream_generator.current_page is not None:
+                        response_data["page"] = stream_generator.current_page
+                        
+                    yield json.dumps(response_data) + "\n"
                 except Exception as e:
                     logger.error(f"最终音频合成失败: {str(e)}")
                     yield json.dumps({
