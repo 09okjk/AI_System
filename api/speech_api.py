@@ -274,7 +274,7 @@ async def process_stream_chunk(text_chunk, cache_state, logger, request_id):
             
             return processed_text
 
-async def check_and_process_segment(cache_state, min_segment_length, segment_markers):
+async def check_and_process_segment(cache_state, min_segment_length, segment_markers, logger):
     """检查是否需要分段，如果需要则返回分段文本"""
     text_buffer = cache_state["text_buffer"]
     
@@ -408,7 +408,7 @@ async def voice_chat_stream(
                     
                     # 检查是否需要分段处理
                     segment_text = await check_and_process_segment(
-                        cache_state, min_segment_length, segment_markers
+                        cache_state, min_segment_length, segment_markers, logger
                     )
                     
                     if segment_text:
