@@ -267,6 +267,10 @@ async def voice_chat_stream(
                         stream_generator.found_content_marker = True
                         # 不再需要原始缓冲区
                         stream_generator.raw_buffer = ""
+                        
+                        # 清空之前可能已经添加的JSON开头部分
+                        text_buffer = ""
+                        logger.info("清空之前的文本缓冲区，避免JSON结构重复")
                     else:
                         # 未找到content标记，跳过当前块
                         logger.info("等待content标记...")
