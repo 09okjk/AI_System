@@ -171,9 +171,11 @@ async def voice_chat(
 
 async def process_stream_chunk(text_chunk, cache_state, logger, request_id):
     """处理单个流式数据块，提取page和content信息"""
-    cache_state["raw_buffer"] += text_chunk
-    
+    # 首次接收内容，进行处理
     if not cache_state["content_started"]:
+        # 先添加到原始缓冲区
+        cache_state["raw_buffer"] += text_chunk
+        
         # 尝试提取page属性
         if '"page":' in cache_state["raw_buffer"]:
             try:
@@ -189,16 +191,39 @@ async def process_stream_chunk(text_chunk, cache_state, logger, request_id):
         
         # 检查是否开始接收content
         if '"content":' in cache_state["raw_buffer"]:
-            content_index = cache_state["raw_buffer"].find('"content":') + len('"content":')
-            processed_text = cache_state["raw_buffer"][content_index:].lstrip(' "')
+            content_marker = '"content":'
+            content_index = cache_state["raw_buffer"].find(content_marker) + len(content_marker)
+            raw_content = cache_state["raw_buffer"][content_index:].lstrip(' "')
+            
+            # 清理JSON结构
+            json_end = raw_content.find('}')
+            if json_end >= 0:
+                processed_text = raw_content[:json_end].rstrip('"')
+            else:
+                processed_text = raw_content.rstrip('"')
+                
+            # 清理嵌套JSON
+            json_start = processed_text.find('{"')
+            if json_start >= 0:
+                processed_text = processed_text[:json_start]
+            
             cache_state["content_started"] = True
             cache_state["raw_buffer"] = ""  # 清空原始缓存
             logger.info(f"开始接收content内容: {processed_text[:50]}...")
+            
+            # 重要：返回处理后的文本，而不是累积
             return processed_text
+        else:
+            # 尚未找到content标记，继续等待
+            return ""
     else:
-        # 已经开始接收content，直接返回文本
-        # 检查是否有新的JSON响应开始，并提取新的页码
-        if '"page":' in text_chunk:
+        # 已经开始接收content
+        
+        # 检查是否有新的JSON响应开始
+        if '"content":' in text_chunk:
+            logger.info("检测到新的JSON响应")
+            
+            # 尝试提取新的页码
             try:
                 page_pattern = r'"page"\s*:\s*([^,}]+)'
                 match = re.search(page_pattern, text_chunk)
@@ -208,35 +233,82 @@ async def process_stream_chunk(text_chunk, cache_state, logger, request_id):
                     logger.info(f"更新页码: {cache_state['current_page']}")
             except Exception as e:
                 logger.warning(f"页码更新失败: {str(e)}")
-        
-        # 清理可能的JSON结构标记
-        cleaned_text = text_chunk
-        if '"content":' in cleaned_text:
-            content_index = cleaned_text.find('"content":') + len('"content":')
-            cleaned_text = cleaned_text[content_index:].lstrip(' "')
-        
-        # 移除可能的JSON结束标记
-        if '}' in cleaned_text:
-            json_end = cleaned_text.find('}')
-            cleaned_text = cleaned_text[:json_end]
-        
-        return cleaned_text
-    
-    return ""
+            
+            # 提取新的content内容
+            content_marker = '"content":'
+            content_index = text_chunk.find(content_marker) + len(content_marker)
+            raw_content = text_chunk[content_index:].lstrip(' "')
+            
+            # 清理JSON结构
+            json_end = raw_content.find('}')
+            if json_end >= 0:
+                processed_text = raw_content[:json_end].rstrip('"')
+            else:
+                processed_text = raw_content.rstrip('"')
+                
+            # 清理嵌套JSON
+            json_start = processed_text.find('{"')
+            if json_start >= 0:
+                processed_text = processed_text[:json_start]
+                
+            # 重要：发现新的JSON响应时，重置文本缓冲区
+            cache_state["text_buffer"] = ""
+            logger.info("检测到新响应，重置文本缓冲区")
+            
+            return processed_text
+        else:
+            # 普通文本块，清理后返回
+            processed_text = text_chunk
+            
+            # 清理可能的JSON字符串
+            json_start = processed_text.find('{"')
+            if json_start >= 0:
+                processed_text = processed_text[:json_start]
+                
+            # 清理结束括号和引号
+            json_end = processed_text.find('}')
+            if json_end >= 0:
+                processed_text = processed_text[:json_end]
+                
+            processed_text = processed_text.rstrip('",')
+            
+            return processed_text
 
 async def check_and_process_segment(cache_state, min_segment_length, segment_markers):
     """检查是否需要分段，如果需要则返回分段文本"""
     text_buffer = cache_state["text_buffer"]
     
+    # 如果缓冲区为空，不处理
+    if not text_buffer:
+        return None
+    
+    # 如果文本长度够长，检查分段点
     if len(text_buffer) >= min_segment_length:
+        last_marker_pos = -1
+        last_marker_len = 0
+        
+        # 查找最合适的分段点（最靠近末尾的标点符号）
         for marker in segment_markers:
-            last_marker = text_buffer.rfind(marker)
-            if last_marker > 0:
-                process_index = last_marker + len(marker)
-                segment_text = text_buffer[:process_index]
-                cache_state["text_buffer"] = text_buffer[process_index:]
-                cache_state["segment_counter"] += 1
-                return segment_text
+            pos = text_buffer.rfind(marker)
+            if pos > last_marker_pos:
+                last_marker_pos = pos
+                last_marker_len = len(marker)
+        
+        # 如果找到了分段点
+        if last_marker_pos > 0:
+            process_index = last_marker_pos + last_marker_len
+            segment_text = text_buffer[:process_index]
+            
+            # 重要：更新缓冲区，移除已处理的文本
+            cache_state["text_buffer"] = text_buffer[process_index:]
+            cache_state["segment_counter"] += 1
+            
+            # 记录分段边界，帮助调试
+            logger.info(f"分段点: '{text_buffer[last_marker_pos:process_index]}' 位置: {last_marker_pos}")
+            logger.info(f"分段文本: '{segment_text}'")
+            logger.info(f"剩余缓冲: '{cache_state['text_buffer'][:20]}...'")
+            
+            return segment_text
     
     return None
 
@@ -329,7 +401,9 @@ async def voice_chat_stream(
                     text_chunk, cache_state, logger, request_id
                 )
                 
+                # 只有当处理出有效文本时才添加到缓冲区
                 if processed_text:
+                    logger.info(f"添加处理后的文本到缓冲区 [{len(processed_text)} 字符]: {processed_text[:30]}...")
                     cache_state["text_buffer"] += processed_text
                     
                     # 检查是否需要分段处理
@@ -338,7 +412,7 @@ async def voice_chat_stream(
                     )
                     
                     if segment_text:
-                        # 发送文本段和音频 - 修复yield问题
+                        # 发送文本段和音频
                         segment_id = f"{request_id}_seg_{cache_state['segment_counter']}"
                         
                         # 发送文本分段
