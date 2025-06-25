@@ -21,12 +21,11 @@ router = APIRouter()
 # 全局变量引用
 def get_managers():
     """获取全局管理器实例"""
-    from main import speech_processor, llm_manager, logger, mongodb_manager
+    from main import speech_processor, llm_manager, logger
     return {
         'speech_processor': speech_processor,
         'llm_manager': llm_manager,
-        'logger': logger,
-        'mongodb_manager': mongodb_manager
+        'logger': logger
     }
 
 # ==================== 语音处理接口 ====================
@@ -102,7 +101,7 @@ async def synthesize_speech(request: SpeechSynthesisRequest):
 async def voice_chat(
     audio_file: UploadFile = File(...),
     llm_model: Optional[str] = None,
-    document_id: Optional[str] = None,  # 修改：替换 system_prompt 为 document_id
+    system_prompt: Optional[str] = None,
     session_id: Optional[str] = None
 ):
     """语音对话接口（语音输入 + 文本和语音输出）"""
@@ -110,13 +109,10 @@ async def voice_chat(
     logger = managers['logger']
     
     request_id = generate_response_id()
-    logger.info(f"开始语音对话 [请求ID: {request_id}] - 会话ID: {session_id}, 文档ID: {document_id}")
+    logger.info(f"开始语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
     
     try:
-        # 1. 构建系统提示词
-        system_prompt = await build_system_prompt_from_document(document_id, managers)
-        
-        # 2. 语音识别
+        # 1. 语音识别
         audio_data = await audio_file.read()
         logger.info(f"执行语音识别 [请求ID: {request_id}]")
         
@@ -129,8 +125,8 @@ async def voice_chat(
         user_text = re.sub(r'<\s*\|\s*[^|]+\s*\|\s*>', '', user_text).strip()
         logger.info(f"识别结果 [请求ID: {request_id}]: {user_text}")
         
-        # 3. LLM 对话
-        logger.info(f"调用 LLM 模型 [请求ID: {request_id}], 请求内容: {user_text}")
+        # 2. LLM 对话
+        logger.info(f"调用 LLM 模型 [请求ID: {request_id}], 请求内容: {user_text}, 系统提示: {system_prompt}")
         
         chat_response = await managers['llm_manager'].chat(
             model_name=llm_model,
@@ -143,7 +139,7 @@ async def voice_chat(
         response_text = chat_response["content"]
         logger.info(f"LLM 响应 [请求ID: {request_id}]: {response_text[:100]}...")
         
-        # 4. 语音合成
+        # 3. 语音合成
         logger.info(f"执行语音合成 [请求ID: {request_id}]")
         
         synthesis_result = await managers['speech_processor'].synthesize(
@@ -176,7 +172,7 @@ async def voice_chat(
 async def voice_chat_stream(
     audio_file: UploadFile = File(...),
     llm_model: Optional[str] = None,
-    document_id: Optional[str] = None,  # 修改：替换 system_prompt 为 document_id
+    system_prompt: Optional[str] = None,
     session_id: Optional[str] = None
 ):
     """流式语音对话接口（语音输入 + 流式文本和语音输出）"""
@@ -184,7 +180,7 @@ async def voice_chat_stream(
     logger = managers['logger']
     
     request_id = generate_response_id()
-    logger.info(f"开始流式语音对话 [请求ID: {request_id}] - 会话ID: {session_id}, 文档ID: {document_id}")
+    logger.info(f"开始流式语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
     
     async def create_stream_generator():
         logger.info(f"创建流式生成器 [请求ID: {request_id}]")
@@ -194,18 +190,11 @@ async def voice_chat_stream(
             start_message = f"data: {json.dumps({'type': 'start', 'request_id': request_id, 'message': 'Stream started'})}\n\n"
             logger.info(f"发送流式开始信号 [请求ID: {request_id}]: {start_message.strip()}")
             yield start_message
+
+            # 0. 系统提示词
             
-            # 1. 构建系统提示词
-            try:
-                system_prompt = await build_system_prompt_from_document(document_id, managers)
-                logger.info(f"系统提示词构建完成 [请求ID: {request_id}] - 长度: {len(system_prompt) if system_prompt else 0}")
-            except Exception as e:
-                logger.error(f"构建系统提示词失败 [请求ID: {request_id}]: {str(e)}")
-                error_message = f"data: {json.dumps({'type': 'error', 'message': f'获取文档数据失败: {str(e)}'})}\n\n"
-                yield error_message
-                return
-            
-            # 2. 语音识别
+
+            # 1. 语音识别
             try:
                 audio_data = await audio_file.read()
                 logger.info(f"执行语音识别 [请求ID: {request_id}] - 音频大小: {len(audio_data)} bytes")
@@ -230,7 +219,7 @@ async def voice_chat_stream(
                 yield error_message
                 return
             
-            # 3. LLM 流式对话
+            # 2. LLM 流式对话
             try:
                 logger.info(f"开始 LLM 流式对话 [请求ID: {request_id}], 请求内容: {user_text}")
                 
@@ -252,7 +241,7 @@ async def voice_chat_stream(
                 async for chunk in managers['llm_manager'].stream_chat(
                     model_name=llm_model,
                     message=user_text,
-                    system_prompt=system_prompt,  # 使用构建的系统提示词
+                    system_prompt=system_prompt,
                     session_id=session_id,
                     request_id=request_id
                 ):
@@ -518,109 +507,3 @@ async def voice_chat_stream(
     )
     
     return response
-
-# ==================== 新增：系统提示词构建函数 ====================
-
-async def build_system_prompt_from_document(document_id: str, managers: dict) -> str:
-    """
-    根据文档ID构建系统提示词
-    
-    Args:
-        document_id: 文档ID
-        managers: 管理器字典
-        
-    Returns:
-        str: 构建的系统提示词
-    """
-    logger = managers['logger']
-    mongodb_manager = managers['mongodb_manager']
-    
-    try:
-        if not document_id:
-            logger.warning("未提供文档ID，使用默认系统提示词")
-            return """资料：
-[]
-
-要求：
-根据用户的需求，找到对应的页，并对该页的内容进行详细的描述。
-
-用户输入：查看第一页
-回复示例：
-{
-    "page": 1,
-    "content": "好的，第一页内容是：..."
-}
-"""
-        
-        # 从MongoDB获取文档数据
-        logger.info(f"从MongoDB获取文档: {document_id}")
-        document = await mongodb_manager.get_document(document_id)
-        
-        if not document or not document.data_list:
-            logger.warning(f"文档 {document_id} 不存在或无数据，使用默认系统提示词")
-            return """资料：
-[]
-
-要求：
-根据用户的需求，找到对应的页，并对该页的内容进行详细的描述。
-
-用户输入：查看第一页
-回复示例：
-{
-    "page": 1,
-    "content": "好的，第一页内容是：..."
-}
-"""
-        
-        # 构建文档内容JSON数组
-        document_json_list = []
-        for item in document.data_list:
-            # 处理文本中的特殊字符，确保JSON有效
-            escaped_text = item.text.replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
-            
-            # 构建JSON格式的文档信息
-            doc_json = {
-                "page": item.sequence,
-                "content": escaped_text
-            }
-            document_json_list.append(doc_json)
-        
-        # 将文档列表转换为JSON字符串
-        documents_json = json.dumps(document_json_list, ensure_ascii=False, indent=2)
-        
-        # 构建最终的系统提示词
-        system_prompt = f"""资料：
-{documents_json}
-
-要求：
-根据用户的需求，找到对应的页，并对该页的内容进行详细的描述。
-
-用户输入：查看第一页
-回复示例：
-{
-    "page": 1,
-    "content": "好的，第一页内容是：..."
-}
-"""
-        
-        logger.info(f"成功构建系统提示词，文档: {document.name}, 数据项数量: {len(document.data_list)}")
-        logger.debug(f"系统提示词长度: {len(system_prompt)} 字符")
-        
-        return system_prompt
-        
-    except Exception as e:
-        logger.error(f"构建系统提示词失败: {str(e)}")
-        # 出错时返回默认提示词
-        return """资料：
-[]
-
-要求：
-根据用户的需求，找到对应的页，并对该页的内容进行详细的描述。
-
-用户输入：查看第一页
-回复示例：
-{
-    "page": 1,
-    "content": "好的，第一页内容是：..."
-}
-""" 
