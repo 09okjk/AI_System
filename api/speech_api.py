@@ -646,12 +646,13 @@ async def voice_chat_stream(
                 
                 # 发送完成信号
                 processing_time = time.time() - start_time
-                done_message = f"data: {json.dumps({
+                done_data = {
                     'type': 'done', 
                     'request_id': request_id, 
                     'processing_time': processing_time,
                     'segments_processed': text_processor.get_segment_counter()
-                })}\n\n"
+                }
+                done_message = f"data: {json.dumps(done_data)}\n\n"
                 logger.info(f"🎉 处理完成: {text_processor.get_segment_counter()} 个文本段，耗时 {processing_time:.2f}s")
                 yield done_message
                 
