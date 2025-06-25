@@ -14,6 +14,7 @@ from src.utils import generate_response_id
 import json
 import time
 import base64
+import uuid
 
 router = APIRouter()
 
@@ -331,6 +332,32 @@ async def process_audio_data(audio_data):
 
 # ==================== 优化的流式语音对话接口 ====================
 
+async def format_sse_event(event_type, data, event_id=None):
+    """格式化SSE事件
+    
+    Args:
+        event_type: 事件类型，将作为event:字段
+        data: 事件数据，将被转换为JSON并作为data:字段
+        event_id: 可选事件ID，用于客户端重连恢复
+        
+    Returns:
+        str: 格式化的SSE事件文本
+    """
+    message = f"event: {event_type}\n"
+    if event_id:
+        message += f"id: {event_id}\n"
+    
+    # 将数据转换为JSON字符串
+    json_data = json.dumps(data, ensure_ascii=False)
+    
+    # 处理多行数据 (SSE格式要求每行数据前都添加"data:"前缀)
+    for line in json_data.split("\n"):
+        message += f"data: {line}\n"
+    
+    # SSE事件以空行结束
+    message += "\n"
+    return message
+
 @router.post("/api/chat/voice/stream")
 async def voice_chat_stream(
     audio_file: UploadFile = File(...),
@@ -342,14 +369,14 @@ async def voice_chat_stream(
     managers = get_managers()
     logger = managers['logger']
     
-    request_id = generate_response_id()
+    request_id = f"{uuid.uuid4()}"
     logger.info(f"开始流式语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
     
     async def stream_generator():
         try:
             # 1. 语音识别
             audio_data = await audio_file.read()
-            logger.info(f"执行语音识别 [请求ID: {request_id}]")
+            start_time = time.time()
             
             recognition_result = await managers['speech_processor'].recognize(
                 audio_data=audio_data,
@@ -357,15 +384,16 @@ async def voice_chat_stream(
             )
             
             user_text = recognition_result.text
-            user_text = re.sub(r'<\s*\|\s*[^|]+\s*\|\s*>', '', user_text).strip()
-            logger.info(f"识别结果 [请求ID: {request_id}]: {user_text}")
+            logger.info(f"语音识别结果 [请求ID: {request_id}]: {user_text}")
             
-            # 发送识别结果
-            yield json.dumps({
-                "type": "recognition",
-                "request_id": request_id,
-                "text": user_text
-            }) + "\n"
+            # SSE格式输出识别结果
+            yield await format_sse_event(
+                event_type="recognition", 
+                data={
+                    "request_id": request_id,
+                    "text": user_text
+                }
+            )
             
             # 2. LLM 流式对话 - 优化缓存处理
             logger.info(f"开始 LLM 流式对话 [请求ID: {request_id}]")
@@ -388,7 +416,6 @@ async def voice_chat_stream(
                 model_name=llm_model,
                 message=user_text,
                 system_prompt=system_prompt,
-                session_id=session_id,
                 request_id=request_id
             ):
                 # 获取文本块
@@ -415,7 +442,7 @@ async def voice_chat_stream(
                         # 发送文本段和音频
                         segment_id = f"{request_id}_seg_{cache_state['segment_counter']}"
                         
-                        # 发送文本分段
+                        # 发送文本分段 (SSE格式)
                         text_response = {
                             "type": "text",
                             "segment_id": segment_id,
@@ -425,7 +452,7 @@ async def voice_chat_stream(
                         if cache_state["current_page"]:
                             text_response["page"] = cache_state["current_page"]
                         
-                        yield json.dumps(text_response) + "\n"
+                        yield await format_sse_event("text", text_response, segment_id)
                         logger.info(f"发送文本分段 [ID: {segment_id}]: {segment_text[:50]}...")
                         
                         # 生成并发送音频
@@ -451,16 +478,16 @@ async def voice_chat_stream(
                             if cache_state["current_page"]:
                                 audio_response["page"] = cache_state["current_page"]
                             
-                            yield json.dumps(audio_response) + "\n"
+                            yield await format_sse_event("audio", audio_response, segment_id)
                             logger.info(f"发送音频分段 [ID: {segment_id}]: 音频长度 {len(audio_base64)} 字符")
                             
                         except Exception as e:
                             logger.error(f"音频合成失败 [分段: {segment_id}]: {str(e)}")
-                            yield json.dumps({
+                            yield await format_sse_event("error", {
                                 "type": "error",
                                 "segment_id": segment_id,
                                 "message": f"音频合成失败: {str(e)}"
-                            }) + "\n"
+                            })
             
             # 处理剩余缓存内容
             if cache_state["text_buffer"]:
@@ -477,7 +504,7 @@ async def voice_chat_stream(
                 if cache_state["current_page"]:
                     text_response["page"] = cache_state["current_page"]
                 
-                yield json.dumps(text_response) + "\n"
+                yield await format_sse_event("text", text_response, segment_id)
                 logger.info(f"发送最终文本 [ID: {segment_id}]: {final_text[:50]}...")
                 
                 # 生成最终音频
@@ -502,36 +529,42 @@ async def voice_chat_stream(
                     if cache_state["current_page"]:
                         audio_response["page"] = cache_state["current_page"]
                     
-                    yield json.dumps(audio_response) + "\n"
+                    yield await format_sse_event("audio", audio_response, segment_id)
                     logger.info(f"发送最终音频 [ID: {segment_id}]: 音频长度 {len(audio_base64)} 字符")
                     
                 except Exception as e:
                     logger.error(f"最终音频合成失败: {str(e)}")
-                    yield json.dumps({
+                    yield await format_sse_event("error", {
                         "type": "error",
                         "segment_id": segment_id,
                         "message": f"最终音频合成失败: {str(e)}"
-                    }) + "\n"
+                    })
             
             # 发送完成信号
             processing_time = time.time() - start_time
-            yield json.dumps({
+            yield await format_sse_event("done", {
                 "type": "done",
                 "request_id": request_id,
                 "processing_time": processing_time,
                 "page": cache_state["current_page"]  # 在完成信号中也包含页码
-            }) + "\n"
+            })
             
             logger.info(f"流式语音对话完成 [请求ID: {request_id}] - 总时长: {processing_time:.2f}s")
             
         except Exception as e:
             logger.error(f"流式语音对话失败 [请求ID: {request_id}]: {str(e)}")
-            yield json.dumps({
+            yield await format_sse_event("error", {
                 "type": "error",
                 "message": str(e)
-            }) + "\n"
+            })
     
     return StreamingResponse(
         stream_generator(),
-        media_type="application/x-ndjson"
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "*"
+        }
     )
