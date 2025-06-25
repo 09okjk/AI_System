@@ -167,7 +167,7 @@ async def voice_chat(
     except Exception as e:
         logger.error(f"语音对话失败 [请求ID: {request_id}]: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-        
+
 @router.post("/api/chat/voice/stream")
 async def voice_chat_stream(
     audio_file: UploadFile = File(...),
@@ -376,6 +376,10 @@ async def voice_chat_stream(
                                         else:
                                             audio_base64 = base64.b64encode(audio_data).decode('utf-8')
                                         
+                                        # 检查音频数据大小
+                                        if len(audio_base64) > 500000:  # 大于500KB
+                                            logger.warning(f"音频数据很大: {len(audio_base64)} 字节，可能导致传输问题")
+                                        
                                         # 发送音频分段
                                         audio_response = {
                                             "type": "audio",
@@ -390,6 +394,8 @@ async def voice_chat_stream(
                                         audio_message = f"data: {json.dumps(audio_response)}\n\n"
                                         logger.info(f"发送音频分段 [{segment_id}]: {len(audio_message)} 字节")
                                         yield audio_message
+
+                                        await asyncio.sleep(0.1)
                                         
                                     except Exception as e:
                                         logger.error(f"音频合成失败 [{segment_id}]: {e}")
