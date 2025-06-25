@@ -209,10 +209,9 @@ async def process_system_prompt_with_documents(system_prompt: str, mongodb_manag
             # 构建新的数据格式
             document_data = []
             for item in document.data_list:
-                # 修正：使用 text 字段而不是 content 字段
                 page_data = {
                     "page": item.sequence,
-                    "content": item.text  # 这里改为使用 text 字段
+                    "content": item.text
                 }
                 document_data.append(page_data)
             
@@ -322,7 +321,7 @@ async def voice_chat_stream(
                 async for chunk in managers['llm_manager'].stream_chat(
                     model_name=llm_model,
                     message=user_text,
-                    system_prompt=processed_system_prompt,  # 使用处理后的系统提示词
+                    system_prompt=processed_system_prompt,
                     session_id=session_id,
                     request_id=request_id
                 ):
@@ -422,11 +421,14 @@ async def voice_chat_stream(
                             if best_split_pos > 0:
                                 # 分割文本
                                 segment_text = content_buffer[:best_split_pos + 1].strip()
+                                # ✅ 关键修改：立即从缓冲区中移除已处理的文本段
                                 content_buffer = content_buffer[best_split_pos + 1:].strip()
                                 
                                 if segment_text and len(segment_text) > 5:
                                     segment_counter += 1
                                     segment_id = f"{request_id}_seg_{segment_counter}"
+                                    
+                                    logger.info(f"📝 准备处理文本段 [{segment_id}]: '{segment_text[:50]}...', 剩余缓冲区长度: {len(content_buffer)}")
                                     
                                     # 发送文本分段
                                     text_data = {
@@ -438,12 +440,12 @@ async def voice_chat_stream(
                                         text_data["page"] = current_page
                                     
                                     text_message = f"data: {json.dumps(text_data)}\n\n"
-                                    logger.info(f"发送文本分段 [{segment_id}]: {text_message.strip()}")
+                                    logger.info(f"📤 发送文本分段 [{segment_id}]: {len(segment_text)} 字符")
                                     yield text_message
                                     
                                     # 合成语音
                                     try:
-                                        logger.info(f"合成语音分段 [{segment_id}]: {segment_text[:50]}...")
+                                        logger.info(f"🎵 开始合成语音分段 [{segment_id}]: {segment_text[:50]}...")
                                         synthesis_result = await managers['speech_processor'].synthesize(
                                             text=segment_text,
                                             request_id=segment_id
@@ -462,7 +464,7 @@ async def voice_chat_stream(
                                         
                                         # 检查音频数据大小
                                         if len(audio_base64) > 500000:  # 大于500KB
-                                            logger.warning(f"音频数据很大: {len(audio_base64)} 字节，可能导致传输问题")
+                                            logger.warning(f"⚠️ 音频数据很大: {len(audio_base64)} 字节，可能导致传输问题")
                                         
                                         # 发送音频分段
                                         audio_response = {
@@ -476,27 +478,36 @@ async def voice_chat_stream(
                                             audio_response["page"] = current_page
                                         
                                         audio_message = f"data: {json.dumps(audio_response)}\n\n"
-                                        logger.info(f"发送音频分段 [{segment_id}]: {len(audio_message)} 字节")
+                                        logger.info(f"🎵✅ 音频合成完成并发送 [{segment_id}]: {len(audio_message)} 字节，文本段已从缓冲区清除")
                                         yield audio_message
+                                        
+                                        # ✅ 重要：音频发送完成后，确认文本段已被处理和清除
+                                        # content_buffer 在上面已经被更新，这里只需要记录日志
+                                        logger.debug(f"🗑️ 文本段 [{segment_id}] 处理完成，已从缓冲区清除，当前缓冲区长度: {len(content_buffer)}")
 
                                         await asyncio.sleep(0.1)
                                         
                                     except Exception as e:
-                                        logger.error(f"音频合成失败 [{segment_id}]: {e}")
+                                        logger.error(f"❌ 音频合成失败 [{segment_id}]: {e}")
                                         error_message = f"data: {json.dumps({'type': 'error', 'message': f'音频合成失败: {str(e)}'})}\n\n"
                                         yield error_message
+                                        
+                                        # ✅ 即使音频合成失败，也要确保文本段已从缓冲区清除
+                                        logger.warning(f"⚠️ 虽然音频合成失败，但文本段 [{segment_id}] 已从缓冲区清除")
                     
                     except Exception as e:
-                        logger.error(f"处理文本块失败: {e}")
+                        logger.error(f"❌ 处理文本块失败: {e}")
                         continue
                 
-                logger.info(f"LLM流式对话完成 [请求ID: {request_id}] - 总共处理 {chunk_count} 个文本块")
+                logger.info(f"✅ LLM流式对话完成 [请求ID: {request_id}] - 总共处理 {chunk_count} 个文本块")
                 
                 # 处理剩余的content_buffer
                 if content_buffer.strip() and len(content_buffer.strip()) > 5:
                     segment_counter += 1
                     segment_id = f"{request_id}_final"
                     final_text = content_buffer.strip()
+                    
+                    logger.info(f"📝 处理最终文本段: '{final_text[:50]}...', 长度: {len(final_text)}")
                     
                     # 发送最后一段文本
                     text_data = {
@@ -508,12 +519,12 @@ async def voice_chat_stream(
                         text_data["page"] = current_page
                     
                     final_text_message = f"data: {json.dumps(text_data)}\n\n"
-                    logger.info(f"发送最终文本分段: {final_text_message.strip()}")
+                    logger.info(f"📤 发送最终文本分段: {len(final_text)} 字符")
                     yield final_text_message
                     
                     # 合成最后一段语音
                     try:
-                        logger.info(f"合成最终语音分段: {final_text[:50]}...")
+                        logger.info(f"🎵 开始合成最终语音分段: {final_text[:50]}...")
                         synthesis_result = await managers['speech_processor'].synthesize(
                             text=final_text,
                             request_id=segment_id
@@ -542,36 +553,44 @@ async def voice_chat_stream(
                             audio_response["page"] = current_page
                         
                         final_audio_message = f"data: {json.dumps(audio_response)}\n\n"
-                        logger.info(f"发送最终音频分段: {len(final_audio_message)} 字节")
+                        logger.info(f"🎵✅ 最终音频合成完成并发送: {len(final_audio_message)} 字节")
                         yield final_audio_message
                         
+                        # ✅ 清空最终的文本缓冲区
+                        content_buffer = ""
+                        logger.info(f"🗑️ 最终文本段处理完成，缓冲区已清空")
+                        
                     except Exception as e:
-                        logger.error(f"最终音频合成失败: {e}")
+                        logger.error(f"❌ 最终音频合成失败: {e}")
                         error_message = f"data: {json.dumps({'type': 'error', 'message': f'最终音频合成失败: {str(e)}'})}\n\n"
                         yield error_message
+                        
+                        # ✅ 即使最终音频合成失败，也要清空缓冲区
+                        content_buffer = ""
+                        logger.warning(f"⚠️ 虽然最终音频合成失败，但缓冲区已清空")
                 
                 # 发送完成信号
                 processing_time = time.time() - start_time
-                done_message = f"data: {json.dumps({'type': 'done', 'request_id': request_id, 'processing_time': processing_time})}\n\n"
-                logger.info(f"发送完成信号: {done_message.strip()}")
+                done_message = f"data: {json.dumps({'type': 'done', 'request_id': request_id, 'processing_time': processing_time, 'segments_processed': segment_counter})}\n\n"
+                logger.info(f"🎉 发送完成信号: 处理了 {segment_counter} 个文本段")
                 yield done_message
                 
             except Exception as e:
-                logger.error(f"LLM流式对话失败 [请求ID: {request_id}]: {str(e)}")
+                logger.error(f"❌ LLM流式对话失败 [请求ID: {request_id}]: {str(e)}")
                 error_message = f"data: {json.dumps({'type': 'error', 'message': f'LLM对话失败: {str(e)}'})}\n\n"
                 yield error_message
             
-            logger.info(f"流式语音对话完成 [请求ID: {request_id}]")
+            logger.info(f"✅ 流式语音对话完成 [请求ID: {request_id}]")
             
         except Exception as e:
-            logger.error(f"流式语音对话失败 [请求ID: {request_id}]: {str(e)}")
+            logger.error(f"❌ 流式语音对话失败 [请求ID: {request_id}]: {str(e)}")
             error_message = f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             yield error_message
         
-        logger.info(f"流式生成器结束 [请求ID: {request_id}]")
+        logger.info(f"🔚 流式生成器结束 [请求ID: {request_id}]")
     
     # 返回SSE流式响应，并添加响应刷新
-    logger.info(f"返回StreamingResponse [请求ID: {request_id}]")
+    logger.info(f"🚀 返回StreamingResponse [请求ID: {request_id}]")
     
     response = StreamingResponse(
         create_stream_generator(),
