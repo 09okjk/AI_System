@@ -98,6 +98,77 @@ async def synthesize_speech(request: SpeechSynthesisRequest):
         logger.error(f"语音合成失败 [请求ID: {request_id}]: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/api/chat/voice", response_model=VoiceChatResponse)
+async def voice_chat(
+    audio_file: UploadFile = File(...),
+    llm_model: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    session_id: Optional[str] = None
+):
+    """语音对话接口（语音输入 + 文本和语音输出）"""
+    managers = get_managers()
+    logger = managers['logger']
+    
+    request_id = generate_response_id()
+    logger.info(f"开始语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
+    
+    try:
+        # 1. 语音识别
+        audio_data = await audio_file.read()
+        logger.info(f"执行语音识别 [请求ID: {request_id}]")
+        
+        recognition_result = await managers['speech_processor'].recognize(
+            audio_data=audio_data,
+            request_id=request_id
+        )
+        
+        user_text = recognition_result.text
+        user_text = re.sub(r'<\s*\|\s*[^|]+\s*\|\s*>', '', user_text).strip()
+        logger.info(f"识别结果 [请求ID: {request_id}]: {user_text}")
+        
+        # 2. LLM 对话
+        logger.info(f"调用 LLM 模型 [请求ID: {request_id}], 请求内容: {user_text}, 系统提示: {system_prompt}")
+        
+        chat_response = await managers['llm_manager'].chat(
+            model_name=llm_model,
+            message=user_text,
+            system_prompt=system_prompt,
+            session_id=session_id,
+            request_id=request_id
+        )
+        
+        response_text = chat_response["content"]
+        logger.info(f"LLM 响应 [请求ID: {request_id}]: {response_text[:100]}...")
+        
+        # 3. 语音合成
+        logger.info(f"执行语音合成 [请求ID: {request_id}]")
+        
+        synthesis_result = await managers['speech_processor'].synthesize(
+            text=response_text,
+            request_id=request_id
+        )
+        
+        logger.info(f"语音对话完成 [请求ID: {request_id}]")
+        
+        return VoiceChatResponse(
+            request_id=request_id,
+            user_text=user_text,
+            response_text=response_text,
+            response_audio=synthesis_result.audio_data,
+            audio_format=synthesis_result.format,
+            session_id=session_id or request_id,
+            model_used=chat_response["model_name"],
+            processing_time={
+                "recognition": recognition_result.processing_time,
+                "llm_chat": chat_response["processing_time"],
+                "synthesis": synthesis_result.processing_time
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"语音对话失败 [请求ID: {request_id}]: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 async def process_system_prompt_with_documents(system_prompt: str, mongodb_manager, logger, request_id: str) -> str:
     """
     处理系统提示词中的documentsId，将其替换为实际的文档数据
@@ -138,11 +209,14 @@ async def process_system_prompt_with_documents(system_prompt: str, mongodb_manag
             # 构建新的数据格式
             document_data = []
             for item in document.data_list:
+                # 修正：使用 text 字段而不是 content 字段
                 page_data = {
                     "page": item.sequence,
-                    "content": item.content
+                    "content": item.text  # 这里改为使用 text 字段
                 }
                 document_data.append(page_data)
+            
+            logger.info(f"构建文档数据完成，包含 {len(document_data)} 个页面 [请求ID: {request_id}]")
             
             # 将文档数据转换为JSON字符串
             document_data_json = json.dumps(document_data, ensure_ascii=False)
