@@ -21,11 +21,12 @@ router = APIRouter()
 # 全局变量引用
 def get_managers():
     """获取全局管理器实例"""
-    from main import speech_processor, llm_manager, logger
+    from main import speech_processor, llm_manager, logger, mongodb_manager
     return {
         'speech_processor': speech_processor,
         'llm_manager': llm_manager,
-        'logger': logger
+        'logger': logger,
+        'mongodb_manager': mongodb_manager
     }
 
 # ==================== 语音处理接口 ====================
@@ -190,7 +191,48 @@ async def voice_chat_stream(
             start_message = f"data: {json.dumps({'type': 'start', 'request_id': request_id, 'message': 'Stream started'})}\n\n"
             logger.info(f"发送流式开始信号 [请求ID: {request_id}]: {start_message.strip()}")
             yield start_message
-
+            
+            # 处理系统提示词中的文档ID
+            processed_system_prompt = system_prompt
+            if system_prompt and '{"documentsId":"' in system_prompt:
+                try:
+                    logger.info(f"检测到系统提示词中可能包含文档ID [请求ID: {request_id}]")
+                    # 提取文档ID
+                    import re
+                    doc_id_match = re.search(r'{"documentsId":"([^"]+)"}', system_prompt)
+                    if doc_id_match:
+                        doc_id = doc_id_match.group(1)
+                        logger.info(f"提取到文档ID: {doc_id} [请求ID: {request_id}]")
+                        
+                        # 获取文档数据
+                        try:
+                            document = await managers['mongodb_manager'].get_document(doc_id)
+                            if document:
+                                # 格式化为指定的数据结构
+                                formatted_data = []
+                                for item in document.data_list:
+                                    formatted_data.append({
+                                        "page": item.sequence,
+                                        "content": item.content
+                                    })
+                                
+                                # 将格式化的数据转换为JSON字符串
+                                import json
+                                formatted_json = json.dumps(formatted_data, ensure_ascii=False)
+                                
+                                # 替换原始文档引用
+                                processed_system_prompt = system_prompt.replace(
+                                    f'{{"documentsId":"{doc_id}"}}', 
+                                    formatted_json
+                                )
+                                logger.info(f"成功替换文档ID为实际内容 [请求ID: {request_id}]")
+                            else:
+                                logger.warning(f"未找到ID为 {doc_id} 的文档 [请求ID: {request_id}]")
+                        except Exception as e:
+                            logger.error(f"获取文档数据失败 [请求ID: {request_id}]: {str(e)}")
+                except Exception as e:
+                    logger.error(f"处理系统提示词中的文档ID失败 [请求ID: {request_id}]: {str(e)}")
+            
             # 0. 系统提示词
             
 
@@ -241,7 +283,7 @@ async def voice_chat_stream(
                 async for chunk in managers['llm_manager'].stream_chat(
                     model_name=llm_model,
                     message=user_text,
-                    system_prompt=system_prompt,
+                    system_prompt=processed_system_prompt,
                     session_id=session_id,
                     request_id=request_id
                 ):
