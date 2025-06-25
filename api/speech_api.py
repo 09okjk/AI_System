@@ -21,11 +21,12 @@ router = APIRouter()
 # 全局变量引用
 def get_managers():
     """获取全局管理器实例"""
-    from main import speech_processor, llm_manager, logger
+    from main import speech_processor, llm_manager, logger, mongodb_manager
     return {
         'speech_processor': speech_processor,
         'llm_manager': llm_manager,
-        'logger': logger
+        'logger': logger,
+        'mongodb_manager': mongodb_manager
     }
 
 # ==================== 语音处理接口 ====================
@@ -97,76 +98,71 @@ async def synthesize_speech(request: SpeechSynthesisRequest):
         logger.error(f"语音合成失败 [请求ID: {request_id}]: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/chat/voice", response_model=VoiceChatResponse)
-async def voice_chat(
-    audio_file: UploadFile = File(...),
-    llm_model: Optional[str] = None,
-    system_prompt: Optional[str] = None,
-    session_id: Optional[str] = None
-):
-    """语音对话接口（语音输入 + 文本和语音输出）"""
-    managers = get_managers()
-    logger = managers['logger']
+async def process_system_prompt_with_documents(system_prompt: str, mongodb_manager, logger, request_id: str) -> str:
+    """
+    处理系统提示词中的documentsId，将其替换为实际的文档数据
     
-    request_id = generate_response_id()
-    logger.info(f"开始语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
+    Args:
+        system_prompt: 原始系统提示词
+        mongodb_manager: MongoDB管理器实例
+        logger: 日志记录器
+        request_id: 请求ID
+    
+    Returns:
+        处理后的系统提示词
+    """
+    if not system_prompt:
+        return system_prompt
     
     try:
-        # 1. 语音识别
-        audio_data = await audio_file.read()
-        logger.info(f"执行语音识别 [请求ID: {request_id}]")
+        # 使用正则表达式匹配 {"documentsId":"..."}
+        pattern = r'\{"documentsId":\s*"([^"]+)"\}'
+        match = re.search(pattern, system_prompt)
         
-        recognition_result = await managers['speech_processor'].recognize(
-            audio_data=audio_data,
-            request_id=request_id
-        )
+        if not match:
+            logger.info(f"系统提示词中未找到documentsId [请求ID: {request_id}]")
+            return system_prompt
         
-        user_text = recognition_result.text
-        user_text = re.sub(r'<\s*\|\s*[^|]+\s*\|\s*>', '', user_text).strip()
-        logger.info(f"识别结果 [请求ID: {request_id}]: {user_text}")
+        document_id = match.group(1)
+        logger.info(f"从系统提示词中提取到documentsId: {document_id} [请求ID: {request_id}]")
         
-        # 2. LLM 对话
-        logger.info(f"调用 LLM 模型 [请求ID: {request_id}], 请求内容: {user_text}, 系统提示: {system_prompt}")
-        
-        chat_response = await managers['llm_manager'].chat(
-            model_name=llm_model,
-            message=user_text,
-            system_prompt=system_prompt,
-            session_id=session_id,
-            request_id=request_id
-        )
-        
-        response_text = chat_response["content"]
-        logger.info(f"LLM 响应 [请求ID: {request_id}]: {response_text[:100]}...")
-        
-        # 3. 语音合成
-        logger.info(f"执行语音合成 [请求ID: {request_id}]")
-        
-        synthesis_result = await managers['speech_processor'].synthesize(
-            text=response_text,
-            request_id=request_id
-        )
-        
-        logger.info(f"语音对话完成 [请求ID: {request_id}]")
-        
-        return VoiceChatResponse(
-            request_id=request_id,
-            user_text=user_text,
-            response_text=response_text,
-            response_audio=synthesis_result.audio_data,
-            audio_format=synthesis_result.format,
-            session_id=session_id or request_id,
-            model_used=chat_response["model_name"],
-            processing_time={
-                "recognition": recognition_result.processing_time,
-                "llm_chat": chat_response["processing_time"],
-                "synthesis": synthesis_result.processing_time
-            }
-        )
-        
+        # 使用mongodb_manager获取文档数据
+        try:
+            document = await mongodb_manager.get_document(document_id)
+            if not document:
+                logger.warning(f"未找到ID为 {document_id} 的文档 [请求ID: {request_id}]")
+                return system_prompt
+            
+            logger.info(f"成功获取文档: {document.name}, 数据项数量: {len(document.data_list)} [请求ID: {request_id}]")
+            
+            # 构建新的数据格式
+            document_data = []
+            for item in document.data_list:
+                page_data = {
+                    "page": item.sequence,
+                    "content": item.content
+                }
+                document_data.append(page_data)
+            
+            # 将文档数据转换为JSON字符串
+            document_data_json = json.dumps(document_data, ensure_ascii=False)
+            
+            # 替换原来的{"documentsId":"..."}为生成的数据
+            processed_prompt = re.sub(pattern, document_data_json, system_prompt)
+            
+            logger.info(f"系统提示词处理完成，替换了documentsId为实际文档数据 [请求ID: {request_id}]")
+            logger.debug(f"处理后的系统提示词长度: {len(processed_prompt)} [请求ID: {request_id}]")
+            
+            return processed_prompt
+            
+        except Exception as e:
+            logger.error(f"获取文档 {document_id} 失败: {str(e)} [请求ID: {request_id}]")
+            # 如果获取文档失败，返回原始系统提示词
+            return system_prompt
+            
     except Exception as e:
-        logger.error(f"语音对话失败 [请求ID: {request_id}]: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"处理系统提示词中的documentsId失败: {str(e)} [请求ID: {request_id}]")
+        return system_prompt
 
 @router.post("/api/chat/voice/stream")
 async def voice_chat_stream(
@@ -191,8 +187,19 @@ async def voice_chat_stream(
             logger.info(f"发送流式开始信号 [请求ID: {request_id}]: {start_message.strip()}")
             yield start_message
 
-            # 0. 系统提示词
-            
+            # 0. 处理系统提示词中的documentsId
+            processed_system_prompt = system_prompt
+            if system_prompt:
+                logger.info(f"开始处理系统提示词 [请求ID: {request_id}]")
+                processed_system_prompt = await process_system_prompt_with_documents(
+                    system_prompt, managers['mongodb_manager'], logger, request_id
+                )
+                
+                if processed_system_prompt != system_prompt:
+                    # 发送系统提示词处理完成的消息
+                    prompt_processed_message = f"data: {json.dumps({'type': 'system_prompt_processed', 'request_id': request_id, 'message': 'System prompt with documents processed'})}\n\n"
+                    logger.info(f"发送系统提示词处理完成信号 [请求ID: {request_id}]")
+                    yield prompt_processed_message
             
             # 1. 语音识别
             try:
@@ -241,7 +248,7 @@ async def voice_chat_stream(
                 async for chunk in managers['llm_manager'].stream_chat(
                     model_name=llm_model,
                     message=user_text,
-                    system_prompt=system_prompt,
+                    system_prompt=processed_system_prompt,  # 使用处理后的系统提示词
                     session_id=session_id,
                     request_id=request_id
                 ):
