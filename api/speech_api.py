@@ -542,7 +542,15 @@ async def build_system_prompt_from_document(document_id: str, managers: dict) ->
 []
 
 要求：
-根据用户的需求，找到对应的页，并对该页的内容进行详细的描述。"""
+根据用户的需求，找到对应的页，并对该页的内容进行详细的描述。
+
+用户输入：查看第一页
+回复示例：
+{
+    "page": 1,
+    "content": "好的，第一页内容是：..."
+}
+"""
         
         # 从MongoDB获取文档数据
         logger.info(f"从MongoDB获取文档: {document_id}")
@@ -554,7 +562,15 @@ async def build_system_prompt_from_document(document_id: str, managers: dict) ->
 []
 
 要求：
-根据用户的需求，找到对应的页，并对该页的内容进行详细的描述。"""
+根据用户的需求，找到对应的页，并对该页的内容进行详细的描述。
+
+用户输入：查看第一页
+回复示例：
+{
+    "page": 1,
+    "content": "好的，第一页内容是：..."
+}
+"""
         
         # 构建文档内容JSON数组
         document_json_list = []
@@ -577,7 +593,15 @@ async def build_system_prompt_from_document(document_id: str, managers: dict) ->
 {documents_json}
 
 要求：
-根据用户的需求，找到对应的页，并对该页的内容进行详细的描述。"""
+根据用户的需求，找到对应的页，并对该页的内容进行详细的描述。
+
+用户输入：查看第一页
+回复示例：
+{
+    "page": 1,
+    "content": "好的，第一页内容是：..."
+}
+"""
         
         logger.info(f"成功构建系统提示词，文档: {document.name}, 数据项数量: {len(document.data_list)}")
         logger.debug(f"系统提示词长度: {len(system_prompt)} 字符")
@@ -591,4 +615,12 @@ async def build_system_prompt_from_document(document_id: str, managers: dict) ->
 []
 
 要求：
-根据用户的需求，找到对应的页，并对该页的内容进行详细的描述。"""
+根据用户的需求，找到对应的页，并对该页的内容进行详细的描述。
+
+用户输入：查看第一页
+回复示例：
+{
+    "page": 1,
+    "content": "好的，第一页内容是：..."
+}
+""" 
