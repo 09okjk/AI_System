@@ -1,5 +1,5 @@
 """
-修复版语音处理相关接口模块
+修复版语音处理相关接口模块 - 解决前端接收问题
 """
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
@@ -17,6 +17,7 @@ import base64
 import asyncio
 import hashlib
 from difflib import SequenceMatcher
+import traceback
 
 router = APIRouter()
 
@@ -439,6 +440,18 @@ class EnhancedTextSegmentProcessor:
         """获取已处理的段落数量"""
         return self.segment_counter
 
+async def send_sse_message(message_data: dict, logger, request_id: str) -> str:
+    """统一的SSE消息发送函数"""
+    try:
+        json_data = json.dumps(message_data, ensure_ascii=False)
+        sse_message = f"data: {json_data}\n\n"
+        logger.debug(f"📡 发送SSE消息 [请求ID: {request_id}] 类型: {message_data.get('type', 'unknown')}")
+        return sse_message
+    except Exception as e:
+        logger.error(f"❌ 构建SSE消息失败 [请求ID: {request_id}]: {e}")
+        error_message = f"data: {json.dumps({'type': 'error', 'message': f'消息构建失败: {str(e)}'})}\n\n"
+        return error_message
+
 @router.post("/api/chat/voice/stream")
 async def voice_chat_stream(
     audio_file: UploadFile = File(...),
@@ -446,7 +459,7 @@ async def voice_chat_stream(
     system_prompt: Optional[str] = None,
     session_id: Optional[str] = None
 ):
-    """修复版流式语音对话接口"""
+    """修复版流式语音对话接口 - 解决前端接收问题"""
     managers = get_managers()
     logger = managers['logger']
     
@@ -456,9 +469,18 @@ async def voice_chat_stream(
     async def create_stream_generator():
         logger.info(f"🔧 创建修复版流式生成器 [请求ID: {request_id}]")
         
+        # 添加流程完成状态跟踪
+        stream_status = {
+            'recognition_completed': False,
+            'llm_completed': False,
+            'final_audio_completed': False,
+            'done_sent': False
+        }
+        
         try:
             # 发送开始信号
-            start_message = f"data: {json.dumps({'type': 'start', 'request_id': request_id, 'message': 'Stream started'})}\n\n"
+            start_data = {'type': 'start', 'request_id': request_id, 'message': 'Stream started'}
+            start_message = await send_sse_message(start_data, logger, request_id)
             logger.info(f"📡 发送流式开始信号 [请求ID: {request_id}]")
             yield start_message
 
@@ -485,16 +507,21 @@ async def voice_chat_stream(
                 logger.info(f"✅ 识别结果 [请求ID: {request_id}]: {user_text}")
                 
                 # 发送识别结果
-                recognition_message = f"data: {json.dumps({'type': 'recognition', 'request_id': request_id, 'text': user_text})}\n\n"
+                recognition_data = {'type': 'recognition', 'request_id': request_id, 'text': user_text}
+                recognition_message = await send_sse_message(recognition_data, logger, request_id)
                 yield recognition_message
+                
+                stream_status['recognition_completed'] = True
+                logger.info(f"✅ 语音识别阶段完成 [请求ID: {request_id}]")
                 
             except Exception as e:
                 logger.error(f"❌ 语音识别失败 [请求ID: {request_id}]: {str(e)}")
-                error_message = f"data: {json.dumps({'type': 'error', 'message': f'语音识别失败: {str(e)}'})}\n\n"
+                error_data = {'type': 'error', 'message': f'语音识别失败: {str(e)}'}
+                error_message = await send_sse_message(error_data, logger, request_id)
                 yield error_message
                 return
             
-            # 2. LLM 流式对话 - 使用增强版处理器
+            # 2. LLM 流式对话
             try:
                 logger.info(f"🤖 开始 LLM 流式对话 [请求ID: {request_id}], 请求内容: {user_text}")
                 
@@ -503,6 +530,7 @@ async def voice_chat_stream(
                 
                 start_time = time.time()
                 chunk_count = 0
+                segments_processed = 0
 
                 async for chunk in managers['llm_manager'].stream_chat(
                     model_name=llm_model,
@@ -535,6 +563,7 @@ async def voice_chat_stream(
                             if not segment_text:
                                 break
                             
+                            segments_processed += 1
                             logger.info(f"📤 处理文本段 #{text_processor.get_segment_counter()}: '{segment_text[:50]}...' (长度: {len(segment_text)})")
                             
                             # 生成段落ID
@@ -547,7 +576,7 @@ async def voice_chat_stream(
                                 "text": segment_text
                             }
                             
-                            text_message = f"data: {json.dumps(text_data)}\n\n"
+                            text_message = await send_sse_message(text_data, logger, request_id)
                             yield text_message
                             
                             # 合成并发送语音
@@ -577,92 +606,134 @@ async def voice_chat_stream(
                                     "format": synthesis_result.format
                                 }
                                 
-                                audio_message = f"data: {json.dumps(audio_response)}\n\n"
+                                audio_message = await send_sse_message(audio_response, logger, request_id)
                                 logger.info(f"🎵✅ 音频合成完成 [{segment_id}]: {len(audio_base64)} bytes base64")
                                 yield audio_message
                                 
                             except Exception as e:
                                 logger.error(f"❌ 音频合成失败 [{segment_id}]: {e}")
-                                error_message = f"data: {json.dumps({'type': 'error', 'message': f'音频合成失败: {str(e)}'})}\n\n"
+                                error_data = {'type': 'error', 'message': f'音频合成失败: {str(e)}'}
+                                error_message = await send_sse_message(error_data, logger, request_id)
                                 yield error_message
                             
                             await asyncio.sleep(0.1)
                     
                     except Exception as e:
-                        logger.error(f"❌ 处理文本块失败: {e}")
+                        logger.error(f"❌ 处理文本块失败 [{chunk_count}]: {e}")
+                        logger.error(f"❌ 错误详情: {traceback.format_exc()}")
                         continue
                 
                 logger.info(f"✅ LLM流式对话完成 [请求ID: {request_id}] - 总共处理 {chunk_count} 个文本块")
+                stream_status['llm_completed'] = True
                 
                 # 处理最终剩余的文本
-                final_text = text_processor.get_final_segment()
-                if final_text:
-                    logger.info(f"🏁 处理最终文本段: '{final_text[:50]}...' (长度: {len(final_text)})")
-                    
-                    final_segment_counter = text_processor.get_segment_counter()
-                    final_segment_id = f"{request_id}_seg_{final_segment_counter}"
-                    
-                    # 发送最终文本段
-                    text_data = {
-                        "type": "text",
-                        "segment_id": final_segment_id,
-                        "text": final_text
-                    }
-                    final_text_message = f"data: {json.dumps(text_data)}\n\n"
-                    yield final_text_message
-                    
-                    # 合成并发送最终语音
-                    try:
-                        synthesis_result = await managers['speech_processor'].synthesize(
-                            text=final_text,
-                            request_id=final_segment_id
-                        )
+                try:
+                    final_text = text_processor.get_final_segment()
+                    if final_text:
+                        logger.info(f"🏁 处理最终文本段: '{final_text[:50]}...' (长度: {len(final_text)})")
                         
-                        # 处理音频数据
-                        audio_data = synthesis_result.audio_data
-                        if isinstance(audio_data, str):
-                            try:
-                                base64.b64decode(audio_data)
-                                audio_base64 = audio_data
-                            except:
-                                audio_base64 = base64.b64encode(audio_data.encode('utf-8')).decode('utf-8')
-                        else:
-                            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                        final_segment_counter = text_processor.get_segment_counter()
+                        final_segment_id = f"{request_id}_seg_{final_segment_counter}"
                         
-                        audio_response = {
-                            "type": "audio",
+                        # 发送最终文本段
+                        text_data = {
+                            "type": "text",
                             "segment_id": final_segment_id,
-                            "text": final_text,
-                            "audio": audio_base64,
-                            "format": synthesis_result.format
+                            "text": final_text
                         }
+                        final_text_message = await send_sse_message(text_data, logger, request_id)
+                        yield final_text_message
                         
-                        final_audio_message = f"data: {json.dumps(audio_response)}\n\n"
-                        yield final_audio_message
-                        
-                    except Exception as e:
-                        logger.error(f"❌ 最终音频合成失败: {e}")
+                        # 合成并发送最终语音
+                        try:
+                            synthesis_result = await managers['speech_processor'].synthesize(
+                                text=final_text,
+                                request_id=final_segment_id
+                            )
+                            
+                            # 处理音频数据
+                            audio_data = synthesis_result.audio_data
+                            if isinstance(audio_data, str):
+                                try:
+                                    base64.b64decode(audio_data)
+                                    audio_base64 = audio_data
+                                except:
+                                    audio_base64 = base64.b64encode(audio_data.encode('utf-8')).decode('utf-8')
+                            else:
+                                audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                            
+                            audio_response = {
+                                "type": "audio",
+                                "segment_id": final_segment_id,
+                                "text": final_text,
+                                "audio": audio_base64,
+                                "format": synthesis_result.format
+                            }
+                            
+                            final_audio_message = await send_sse_message(audio_response, logger, request_id)
+                            yield final_audio_message
+                            logger.info(f"🎵✅ 最终音频合成完成 [{final_segment_id}]")
+                            
+                        except Exception as e:
+                            logger.error(f"❌ 最终音频合成失败: {e}")
+                    
+                    stream_status['final_audio_completed'] = True
+                    
+                except Exception as e:
+                    logger.error(f"❌ 处理最终文本段失败: {e}")
+                    logger.error(f"❌ 错误详情: {traceback.format_exc()}")
                 
-                # 发送完成信号
-                processing_time = time.time() - start_time
-                done_data = {
-                    'type': 'done', 
-                    'request_id': request_id, 
-                    'processing_time': processing_time,
-                    'segments_processed': text_processor.get_segment_counter()
-                }
-                done_message = f"data: {json.dumps(done_data)}\n\n"
-                yield done_message
-                
+                # 🔧 关键修复：确保发送完成信号
+                try:
+                    processing_time = time.time() - start_time
+                    done_data = {
+                        'type': 'done', 
+                        'request_id': request_id, 
+                        'processing_time': processing_time,
+                        'segments_processed': text_processor.get_segment_counter(),
+                        'chunks_processed': chunk_count,
+                        'status': 'completed'
+                    }
+                    done_message = await send_sse_message(done_data, logger, request_id)
+                    yield done_message
+                    
+                    stream_status['done_sent'] = True
+                    logger.info(f"✅ 发送完成信号 [请求ID: {request_id}] - 处理时间: {processing_time:.2f}s, 段落: {text_processor.get_segment_counter()}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ 发送完成信号失败: {e}")
+                    
             except Exception as e:
                 logger.error(f"❌ LLM流式对话失败: {e}")
-                error_message = f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                logger.error(f"❌ 错误详情: {traceback.format_exc()}")
+                error_data = {'type': 'error', 'message': str(e)}
+                error_message = await send_sse_message(error_data, logger, request_id)
                 yield error_message
             
         except Exception as e:
             logger.error(f"❌ 流式语音对话失败: {e}")
-            error_message = f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            logger.error(f"❌ 错误详情: {traceback.format_exc()}")
+            error_data = {'type': 'error', 'message': str(e)}
+            error_message = await send_sse_message(error_data, logger, request_id)
             yield error_message
+        
+        finally:
+            # 🔧 关键修复：无论如何都要发送最终状态
+            if not stream_status['done_sent']:
+                try:
+                    final_done_data = {
+                        'type': 'done',
+                        'request_id': request_id,
+                        'status': 'completed' if all(stream_status.values()) else 'partial',
+                        'stream_status': stream_status
+                    }
+                    final_done_message = await send_sse_message(final_done_data, logger, request_id)
+                    yield final_done_message
+                    logger.info(f"✅ 在finally中发送最终完成信号 [请求ID: {request_id}]")
+                except Exception as e:
+                    logger.error(f"❌ 发送最终完成信号失败: {e}")
+            
+            logger.info(f"🏁 流式生成器完成 [请求ID: {request_id}] - 状态: {stream_status}")
     
     return StreamingResponse(
         create_stream_generator(),
