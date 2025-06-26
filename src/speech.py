@@ -322,7 +322,9 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             self.load_wav = load_wav
             self.torchaudio = torchaudio
             
-            await self._register_default_speaker()
+            # 参考音频设置
+            self.reference_audio_path = self.config.get('reference_audio', None)
+            self.reference_text = self.config.get('reference_text', '参考音频文本')
             
             logger.info(f"✅ CosyVoice 模型初始化成功 - 模型路径: {model_dir}")
             
@@ -333,50 +335,13 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             logger.error(f"❌ CosyVoice 初始化失败: {str(e)}")
             raise
     
-    async def _register_default_speaker(self):
-        """注册默认说话人 - 关键修复"""
-        reference_audio_path = self.config.get('reference_audio', None)
-        reference_text = self.config.get('reference_text', '参考音频文本')
-        
-        if reference_audio_path and Path(reference_audio_path).exists():
-            try:
-                # 确保音频格式正确
-                if not reference_audio_path.endswith('.wav'):
-                    reference_audio_path = convert_audio_to_wav(
-                        reference_audio_path, 
-                        sample_rate=self.model.sample_rate
-                    )
-                
-                # 加载参考音频
-                prompt_speech = self.load_wav(reference_audio_path, self.model.sample_rate)
-                
-                # 🔥 关键：使用官方API注册说话人
-                self.default_speaker_id = 'my_default_speaker'
-                success = self.model.add_zero_shot_spk(
-                    reference_text, 
-                    prompt_speech, 
-                    self.default_speaker_id
-                )
-                
-                if success:
-                    # 🔥 关键：保存说话人信息
-                    self.model.save_spkinfo()
-                    logger.info(f"✅ 默认说话人注册成功: {self.default_speaker_id}")
-                else:
-                    logger.error("❌ 默认说话人注册失败")
-                    self.default_speaker_id = None
-                    
-            except Exception as e:
-                logger.error(f"❌ 说话人注册失败: {str(e)}")
-                self.default_speaker_id = None
-
     async def synthesize(self, 
                         text: str, 
                         voice: Optional[str] = None,
                         language: str = "zh-CN",
                         speed: float = 1.0,
                         pitch: float = 1.0,
-                        synthesis_mode: str = "zero_shot",
+                        synthesis_mode: str = "instruct",
                         **kwargs) -> Dict[str, Any]:
         """CosyVoice 语音合成 - 支持多种合成模式"""
         start_time = time.time()
@@ -442,29 +407,6 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
     
     async def _zero_shot_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """零样本语音合成"""
-        # 🔥 关键修复：优先使用注册的说话人ID
-        if hasattr(self, 'default_speaker_id') and self.default_speaker_id:
-            logger.info(f"使用注册的说话人: {self.default_speaker_id}")
-            
-            output_audio = None
-            stream = kwargs.get('stream', False)
-            
-            # 🔥 使用说话人ID，而不是重新加载音频
-            for i, result in enumerate(self.model.inference_zero_shot(
-                text, '', '',  # 空的参考文本和音频
-                zero_shot_spk_id=self.default_speaker_id,  # 使用保存的说话人ID
-                stream=stream
-            )):
-                output_audio = result['tts_speech']
-                if not stream:
-                    break
-            
-            if output_audio is not None:
-                return await self._process_output_audio(output_audio)
-        
-        # 如果没有注册的说话人，回退到原来的方法
-        logger.warning("未找到注册的说话人，使用原始方法")        
-
         # 获取参考音频
         reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
         reference_text = kwargs.get('reference_text', self.reference_text)
