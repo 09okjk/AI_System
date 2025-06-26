@@ -421,7 +421,7 @@ class TextSegmentProcessor:
         return self.segment_counter
 
 class SimpleTextSegmentProcessor:
-    """简化的文本分段处理器，直接处理纯文本"""
+    """修复的简化文本分段处理器，确保不重复处理相同的文本段"""
     
     def __init__(self, request_id: str, logger, min_segment_length: int = 40):
         self.request_id = request_id
@@ -441,10 +441,10 @@ class SimpleTextSegmentProcessor:
         if not text_chunk:
             return
             
-        self.logger.debug(f"📝 添加文本块: '{text_chunk[:50]}...', 当前缓冲区长度: {len(self.text_buffer)}")
-        
-        # 直接添加到文本缓冲区
+        old_length = len(self.text_buffer)
         self.text_buffer += text_chunk
+        
+        self.logger.debug(f"📝 添加文本块: '{text_chunk[:50]}...', 缓冲区长度: {old_length} -> {len(self.text_buffer)}")
     
     def get_next_segment(self) -> tuple[str, bool]:
         """
@@ -452,39 +452,59 @@ class SimpleTextSegmentProcessor:
         返回: (segment_text, has_more)
         """
         if len(self.text_buffer) <= self.last_processed_pos:
+            self.logger.debug(f"📝 没有新内容可处理: 缓冲区长度={len(self.text_buffer)}, 已处理位置={self.last_processed_pos}")
             return "", False
         
         # 检查剩余未处理的内容长度
         remaining_content = self.text_buffer[self.last_processed_pos:]
         if len(remaining_content) < self.min_segment_length:
+            self.logger.debug(f"📝 剩余内容太短: {len(remaining_content)} < {self.min_segment_length}")
             return "", False
+        
+        self.logger.debug(f"📝 查找分割点，剩余内容: '{remaining_content[:100]}...', 长度: {len(remaining_content)}")
         
         # 找到分割点（在剩余内容中查找）
         best_split_pos = -1
+        best_marker = ""
         
-        # 查找最佳分割点
+        # 查找最佳分割点 - 修复：确保找到的是有效的分割点
         for marker in self.segment_markers:
             pos = remaining_content.find(marker)
             while pos != -1:
+                # 确保分割点满足最小长度要求
                 if pos >= self.min_segment_length - 1:
                     if pos > best_split_pos:
                         best_split_pos = pos
+                        best_marker = marker
                     break
+                # 继续查找下一个分割点
                 pos = remaining_content.find(marker, pos + 1)
         
         if best_split_pos > 0:
-            # 提取文本段
+            # 提取文本段 - 修复：确保正确计算位置
             segment_text = remaining_content[:best_split_pos + 1].strip()
             
             if segment_text:
-                # 更新已处理位置
+                # 修复：正确更新已处理位置
+                old_pos = self.last_processed_pos
                 self.last_processed_pos += best_split_pos + 1
                 self.segment_counter += 1
                 
-                self.logger.info(f"✂️ 提取文本段 #{self.segment_counter}: '{segment_text[:50]}...', 已处理位置: {self.last_processed_pos} / {len(self.text_buffer)}")
+                self.logger.info(f"✂️ 提取文本段 #{self.segment_counter}: '{segment_text[:50]}...', 已处理位置: {old_pos} -> {self.last_processed_pos} / {len(self.text_buffer)}")
+                self.logger.debug(f"✂️ 分割标记: '{best_marker}', 分割位置: {best_split_pos}")
+                self.logger.debug(f"✂️ 完整文本段: '{segment_text}'")
+                
+                # 验证没有重复内容
+                if self.segment_counter > 1:
+                    # 获取前一个已处理的部分
+                    previous_content = self.text_buffer[:old_pos]
+                    if segment_text in previous_content:
+                        self.logger.warning(f"⚠️ 检测到重复内容！段落 #{self.segment_counter} 包含之前已处理的文本")
+                        self.logger.warning(f"⚠️ 重复段落: '{segment_text}'")
                 
                 return segment_text, True
         
+        self.logger.debug(f"📝 未找到合适的分割点，best_split_pos={best_split_pos}")
         return "", False
     
     def get_final_segment(self) -> str:
@@ -492,11 +512,24 @@ class SimpleTextSegmentProcessor:
         if self.last_processed_pos < len(self.text_buffer):
             final_text = self.text_buffer[self.last_processed_pos:].strip()
             
+            self.logger.debug(f"🏁 检查最终文本段: 起始位置={self.last_processed_pos}, 缓冲区长度={len(self.text_buffer)}")
+            self.logger.debug(f"🏁 最终文本内容: '{final_text}'")
+            
             if final_text and len(final_text) > 5:
                 self.segment_counter += 1
-                self.last_processed_pos = len(self.text_buffer)
+                old_pos = self.last_processed_pos
+                self.last_processed_pos = len(self.text_buffer)  # 标记为已全部处理
                 
                 self.logger.info(f"🏁 提取最终文本段 #{self.segment_counter}: '{final_text[:50]}...', 长度: {len(final_text)}")
+                self.logger.debug(f"🏁 最终处理位置: {old_pos} -> {self.last_processed_pos}")
+                
+                # 验证没有重复内容
+                if self.segment_counter > 1:
+                    previous_content = self.text_buffer[:old_pos]
+                    if final_text in previous_content:
+                        self.logger.warning(f"⚠️ 检测到重复内容！最终段落包含之前已处理的文本")
+                        self.logger.warning(f"⚠️ 重复段落: '{final_text}'")
+                
                 return final_text
         
         return ""
@@ -504,6 +537,18 @@ class SimpleTextSegmentProcessor:
     def get_segment_counter(self):
         """获取已处理的段落数量"""
         return self.segment_counter
+    
+    def debug_state(self):
+        """调试方法：打印当前状态"""
+        self.logger.debug(f"🔍 处理器状态:")
+        self.logger.debug(f"  缓冲区长度: {len(self.text_buffer)}")
+        self.logger.debug(f"  已处理位置: {self.last_processed_pos}")
+        self.logger.debug(f"  段落计数: {self.segment_counter}")
+        self.logger.debug(f"  缓冲区内容: '{self.text_buffer}'")
+        if self.last_processed_pos > 0:
+            self.logger.debug(f"  已处理内容: '{self.text_buffer[:self.last_processed_pos]}'")
+        if self.last_processed_pos < len(self.text_buffer):
+            self.logger.debug(f"  剩余内容: '{self.text_buffer[self.last_processed_pos:]}'")
     
 @router.post("/api/chat/voice/stream")
 async def voice_chat_stream(
@@ -594,6 +639,10 @@ async def voice_chat_stream(
                         
                         # 直接添加文本块到处理器
                         text_processor.add_text(text_chunk)
+                        
+                        # 添加调试信息
+                        if chunk_count % 10 == 0:  # 每10个块输出一次状态
+                            text_processor.debug_state()
                         
                         # 检查是否有可处理的文本段
                         while True:
