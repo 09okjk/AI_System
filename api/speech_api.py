@@ -625,19 +625,12 @@ async def voice_chat_stream(
                 error_message = f"data: {json.dumps({'type': 'error', 'message': f'LLM对话失败: {str(e)}'})}\n\n"
                 yield error_message
             
-            logger.info(f"✅ 简化流式语音对话完成 [请求ID: {request_id}]")
-            
         except Exception as e:
             logger.error(f"❌ 流式语音对话失败 [请求ID: {request_id}]: {str(e)}")
             error_message = f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             yield error_message
-        
-        logger.info(f"🔚 简化流式生成器结束 [请求ID: {request_id}]")
     
-    # 返回SSE流式响应
-    logger.info(f"🚀 返回StreamingResponse [请求ID: {request_id}]")
-    
-    response = StreamingResponse(
+    return StreamingResponse(
         create_stream_generator(),
         media_type="text/event-stream",
         headers={
@@ -650,5 +643,3 @@ async def voice_chat_stream(
             "Transfer-Encoding": "chunked",
         }
     )
-    
-    return response
