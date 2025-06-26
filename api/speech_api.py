@@ -389,11 +389,9 @@ async def voice_chat_stream(
     logger = managers['logger']
     
     request_id = generate_response_id()
-    logger.info(f"🚀 开始简化流式语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
+    logger.info(f"🚀 开始修复版流式语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
     
     async def create_stream_generator():
-        logger.info(f"🔧 创建简化流式生成器 [请求ID: {request_id}]")
-        
         try:
             # 发送开始信号
             start_message = f"data: {json.dumps({'type': 'start', 'request_id': request_id, 'message': 'Stream started'})}\n\n"
@@ -434,15 +432,16 @@ async def voice_chat_stream(
                 yield error_message
                 return
             
-            # 2. LLM 流式对话 - 简化版本
+            # 2. LLM 流式对话 - 修复累积文本问题
             try:
-                logger.info(f"🤖 开始 LLM 流式对话 [请求ID: {request_id}], 请求内容: {user_text}")
+                logger.info(f"🤖 开始 LLM 流式对话 [请求ID: {request_id}]")
                 
-                # 初始化简化的文本分段处理器
+                # 初始化文本分段处理器
                 text_processor = SimpleTextSegmentProcessor(request_id, logger)
                 
                 start_time = time.time()
                 chunk_count = 0
+                previous_complete_text = ""  # 🔧 关键修复：记录上一次的完整文本
                 
                 async for chunk in managers['llm_manager'].stream_chat(
                     model_name=llm_model,
@@ -454,24 +453,37 @@ async def voice_chat_stream(
                     try:
                         chunk_count += 1
                         
-                        # 获取文本块 - 直接处理纯文本
+                        # 获取当前完整文本
                         if isinstance(chunk, dict):
-                            text_chunk = chunk.get("content", "")
+                            current_complete_text = chunk.get("content", "")
                         else:
-                            text_chunk = str(chunk)
+                            current_complete_text = str(chunk)
                         
-                        if not text_chunk:
+                        if not current_complete_text:
                             logger.debug(f"⏭️ 跳过空文本块 [请求ID: {request_id}] - 块 {chunk_count}")
                             continue
                         
-                        logger.debug(f"📝 处理文本块 [{chunk_count}]: '{text_chunk[:30]}...'")
+                        # 🔧 关键修复：计算增量文本（新增的部分）
+                        if current_complete_text.startswith(previous_complete_text):
+                            # 累积模式：提取新增部分
+                            incremental_text = current_complete_text[len(previous_complete_text):]
+                            logger.debug(f"📝 累积模式 - 增量文本块 [{chunk_count}]: '{incremental_text[:30]}...' (长度: {len(incremental_text)})")
+                        else:
+                            # 增量模式：直接使用当前文本
+                            incremental_text = current_complete_text
+                            logger.debug(f"📝 增量模式 - 文本块 [{chunk_count}]: '{incremental_text[:30]}...' (长度: {len(incremental_text)})")
                         
-                        # 直接添加文本块到处理器
-                        text_processor.add_text(text_chunk)
+                        # 更新记录的完整文本
+                        previous_complete_text = current_complete_text
                         
-                        # 添加调试信息
-                        # if chunk_count % 10 == 0:  # 每10个块输出一次状态
-                        #     text_processor.debug_state()
+                        # 只有当有新增内容时才处理
+                        if not incremental_text.strip():
+                            continue
+                        
+                        logger.debug(f"✅ 处理增量文本块 [{chunk_count}]: '{incremental_text[:50]}...' (长度: {len(incremental_text)})")
+                        
+                        # 🔧 关键修复：只添加增量文本到处理器
+                        text_processor.add_text(incremental_text)
                         
                         # 检查是否有可处理的文本段
                         while True:
@@ -481,7 +493,7 @@ async def voice_chat_stream(
                             
                             logger.info(f"📤 处理文本段 #{text_processor.get_segment_counter()}: '{segment_text[:50]}...' (长度: {len(segment_text)})")
                             
-                            # 发送文本段
+                            # 发送文本段和音频的代码保持不变...
                             segment_id = f"{request_id}_seg_{text_processor.get_segment_counter()}"
                             
                             text_data = {
@@ -494,7 +506,7 @@ async def voice_chat_stream(
                             logger.info(f"📤 发送文本段 [{segment_id}]: {len(segment_text)} 字符")
                             yield text_message
                             
-                            # 合成并发送语音
+                            # 合成并发送语音（代码保持不变）
                             try:
                                 logger.info(f"🎵 开始合成语音 [{segment_id}]: '{segment_text[:50]}...'")
                                 
