@@ -420,6 +420,91 @@ class TextSegmentProcessor:
         """获取已处理的段落数量"""
         return self.segment_counter
 
+class SimpleTextSegmentProcessor:
+    """简化的文本分段处理器，直接处理纯文本"""
+    
+    def __init__(self, request_id: str, logger, min_segment_length: int = 40):
+        self.request_id = request_id
+        self.logger = logger
+        self.min_segment_length = min_segment_length
+        self.segment_markers = ["。", "！", "？", "；", ".", "!", "?", ";", "\n"]
+        
+        # 简化的状态管理
+        self.text_buffer = ""
+        self.last_processed_pos = 0
+        self.segment_counter = 0
+        
+        self.logger.info(f"🔧 初始化简化文本分段处理器 [请求ID: {request_id}]")
+    
+    def add_text(self, text_chunk: str):
+        """直接添加文本块"""
+        if not text_chunk:
+            return
+            
+        self.logger.debug(f"📝 添加文本块: '{text_chunk[:50]}...', 当前缓冲区长度: {len(self.text_buffer)}")
+        
+        # 直接添加到文本缓冲区
+        self.text_buffer += text_chunk
+    
+    def get_next_segment(self) -> tuple[str, bool]:
+        """
+        获取下一个可处理的文本段
+        返回: (segment_text, has_more)
+        """
+        if len(self.text_buffer) <= self.last_processed_pos:
+            return "", False
+        
+        # 检查剩余未处理的内容长度
+        remaining_content = self.text_buffer[self.last_processed_pos:]
+        if len(remaining_content) < self.min_segment_length:
+            return "", False
+        
+        # 找到分割点（在剩余内容中查找）
+        best_split_pos = -1
+        
+        # 查找最佳分割点
+        for marker in self.segment_markers:
+            pos = remaining_content.find(marker)
+            while pos != -1:
+                if pos >= self.min_segment_length - 1:
+                    if pos > best_split_pos:
+                        best_split_pos = pos
+                    break
+                pos = remaining_content.find(marker, pos + 1)
+        
+        if best_split_pos > 0:
+            # 提取文本段
+            segment_text = remaining_content[:best_split_pos + 1].strip()
+            
+            if segment_text:
+                # 更新已处理位置
+                self.last_processed_pos += best_split_pos + 1
+                self.segment_counter += 1
+                
+                self.logger.info(f"✂️ 提取文本段 #{self.segment_counter}: '{segment_text[:50]}...', 已处理位置: {self.last_processed_pos} / {len(self.text_buffer)}")
+                
+                return segment_text, True
+        
+        return "", False
+    
+    def get_final_segment(self) -> str:
+        """获取最终剩余的文本段"""
+        if self.last_processed_pos < len(self.text_buffer):
+            final_text = self.text_buffer[self.last_processed_pos:].strip()
+            
+            if final_text and len(final_text) > 5:
+                self.segment_counter += 1
+                self.last_processed_pos = len(self.text_buffer)
+                
+                self.logger.info(f"🏁 提取最终文本段 #{self.segment_counter}: '{final_text[:50]}...', 长度: {len(final_text)}")
+                return final_text
+        
+        return ""
+    
+    def get_segment_counter(self):
+        """获取已处理的段落数量"""
+        return self.segment_counter
+    
 @router.post("/api/chat/voice/stream")
 async def voice_chat_stream(
     audio_file: UploadFile = File(...),
@@ -427,35 +512,29 @@ async def voice_chat_stream(
     system_prompt: Optional[str] = None,
     session_id: Optional[str] = None
 ):
-    """流式语音对话接口（语音输入 + 流式文本和语音输出）"""
+    """简化的流式语音对话接口（语音输入 + 流式文本和语音输出）"""
     managers = get_managers()
     logger = managers['logger']
     
     request_id = generate_response_id()
-    logger.info(f"🚀 开始流式语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
+    logger.info(f"🚀 开始简化流式语音对话 [请求ID: {request_id}] - 会话ID: {session_id}")
     
     async def create_stream_generator():
-        logger.info(f"🔧 创建流式生成器 [请求ID: {request_id}]")
+        logger.info(f"🔧 创建简化流式生成器 [请求ID: {request_id}]")
         
         try:
-            # 立即发送一个测试消息，确保连接建立
+            # 发送开始信号
             start_message = f"data: {json.dumps({'type': 'start', 'request_id': request_id, 'message': 'Stream started'})}\n\n"
             logger.info(f"📡 发送流式开始信号 [请求ID: {request_id}]")
             yield start_message
 
-            # 0. 处理系统提示词中的documentsId
+            # 处理系统提示词中的documentsId
             processed_system_prompt = system_prompt
             if system_prompt:
                 logger.info(f"📋 开始处理系统提示词 [请求ID: {request_id}]")
                 processed_system_prompt = await process_system_prompt_with_documents(
                     system_prompt, managers['mongodb_manager'], logger, request_id
                 )
-                
-                if processed_system_prompt != system_prompt:
-                    # 发送系统提示词处理完成的消息
-                    prompt_processed_message = f"data: {json.dumps({'type': 'system_prompt_processed', 'request_id': request_id, 'message': 'System prompt with documents processed'})}\n\n"
-                    logger.info(f"✅ 发送系统提示词处理完成信号 [请求ID: {request_id}]")
-                    yield prompt_processed_message
             
             # 1. 语音识别
             try:
@@ -481,12 +560,12 @@ async def voice_chat_stream(
                 yield error_message
                 return
             
-            # 2. LLM 流式对话
+            # 2. LLM 流式对话 - 简化版本
             try:
                 logger.info(f"🤖 开始 LLM 流式对话 [请求ID: {request_id}], 请求内容: {user_text}")
                 
-                # 初始化文本分段处理器
-                text_processor = TextSegmentProcessor(request_id, logger)
+                # 初始化简化的文本分段处理器
+                text_processor = SimpleTextSegmentProcessor(request_id, logger)
                 
                 start_time = time.time()
                 chunk_count = 0
@@ -501,7 +580,7 @@ async def voice_chat_stream(
                     try:
                         chunk_count += 1
                         
-                        # 获取文本块
+                        # 获取文本块 - 直接处理纯文本
                         if isinstance(chunk, dict):
                             text_chunk = chunk.get("content", "")
                         else:
@@ -513,8 +592,8 @@ async def voice_chat_stream(
                         
                         logger.debug(f"📝 处理文本块 [{chunk_count}]: '{text_chunk[:30]}...'")
                         
-                        # 添加文本块到处理器
-                        text_processor.add_chunk(text_chunk)
+                        # 直接添加文本块到处理器
+                        text_processor.add_text(text_chunk)
                         
                         # 检查是否有可处理的文本段
                         while True:
@@ -532,10 +611,6 @@ async def voice_chat_stream(
                                 "segment_id": segment_id,
                                 "text": segment_text
                             }
-                            
-                            current_page = text_processor.get_current_page()
-                            if current_page is not None:
-                                text_data["page"] = current_page
                             
                             text_message = f"data: {json.dumps(text_data)}\n\n"
                             logger.info(f"📤 发送文本段 [{segment_id}]: {len(segment_text)} 字符")
@@ -570,9 +645,6 @@ async def voice_chat_stream(
                                     "format": synthesis_result.format
                                 }
                                 
-                                if current_page is not None:
-                                    audio_response["page"] = current_page
-                                
                                 audio_message = f"data: {json.dumps(audio_response)}\n\n"
                                 logger.info(f"🎵✅ 音频合成完成 [{segment_id}]: {len(audio_message)} 字节")
                                 yield audio_message
@@ -603,10 +675,6 @@ async def voice_chat_stream(
                         "segment_id": final_segment_id,
                         "text": final_text
                     }
-                    
-                    current_page = text_processor.get_current_page()
-                    if current_page is not None:
-                        text_data["page"] = current_page
                     
                     final_text_message = f"data: {json.dumps(text_data)}\n\n"
                     logger.info(f"📤 发送最终文本段 [{final_segment_id}]: {len(final_text)} 字符")
@@ -641,9 +709,6 @@ async def voice_chat_stream(
                             "format": synthesis_result.format
                         }
                         
-                        if current_page is not None:
-                            audio_response["page"] = current_page
-                        
                         final_audio_message = f"data: {json.dumps(audio_response)}\n\n"
                         logger.info(f"🎵✅ 最终音频合成完成 [{final_segment_id}]: {len(final_audio_message)} 字节")
                         yield final_audio_message
@@ -670,14 +735,14 @@ async def voice_chat_stream(
                 error_message = f"data: {json.dumps({'type': 'error', 'message': f'LLM对话失败: {str(e)}'})}\n\n"
                 yield error_message
             
-            logger.info(f"✅ 流式语音对话完成 [请求ID: {request_id}]")
+            logger.info(f"✅ 简化流式语音对话完成 [请求ID: {request_id}]")
             
         except Exception as e:
             logger.error(f"❌ 流式语音对话失败 [请求ID: {request_id}]: {str(e)}")
             error_message = f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             yield error_message
         
-        logger.info(f"🔚 流式生成器结束 [请求ID: {request_id}]")
+        logger.info(f"🔚 简化流式生成器结束 [请求ID: {request_id}]")
     
     # 返回SSE流式响应
     logger.info(f"🚀 返回StreamingResponse [请求ID: {request_id}]")
