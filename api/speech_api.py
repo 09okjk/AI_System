@@ -590,6 +590,8 @@ async def voice_chat_stream(
                 processed_system_prompt = await process_system_prompt_with_documents(
                     system_prompt, managers['mongodb_manager'], logger, request_id
                 )
+
+            logger.info(f"📋 处理后的系统提示词 [请求ID: {request_id}]: {processed_system_prompt}")
             
             # 1. 语音识别
             try:
