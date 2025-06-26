@@ -442,7 +442,8 @@ async def voice_chat_stream(
                 start_time = time.time()
                 chunk_count = 0
                 previous_complete_text = ""  # 🔧 关键修复：记录上一次的完整文本
-                
+                llm_stream_ended = False  # 🔧 新增：标记LLM流是否结束
+
                 async for chunk in managers['llm_manager'].stream_chat(
                     model_name=llm_model,
                     message=user_text,
@@ -467,6 +468,12 @@ async def voice_chat_stream(
                         if current_complete_text.startswith(previous_complete_text):
                             # 累积模式：提取新增部分
                             incremental_text = current_complete_text[len(previous_complete_text):]
+                            
+                            # 🔧 新增：检测是否为最后的完整重复内容
+                            if not incremental_text.strip() and len(current_complete_text) > 100:
+                                logger.warning(f"🔄 检测到LLM最终完整输出重复，跳过处理 [{chunk_count}]")
+                                continue
+                            
                             logger.debug(f"📝 累积模式 - 增量文本块 [{chunk_count}]: '{incremental_text[:30]}...' (长度: {len(incremental_text)})")
                         else:
                             # 增量模式：直接使用当前文本
@@ -504,13 +511,10 @@ async def voice_chat_stream(
                             }
                             
                             text_message = f"data: {json.dumps(text_data)}\n\n"
-                            logger.info(f"📤 发送文本段 [{segment_id}]: {len(segment_text)} 字符")
                             yield text_message
                             
                             # 合成并发送语音
-                            try:
-                                logger.info(f"🎵 开始合成语音 [{segment_id}]: '{segment_text[:50]}...'")
-                                
+                            try:                                
                                 synthesis_result = await managers['speech_processor'].synthesize(
                                     text=segment_text,
                                     request_id=segment_id
@@ -553,14 +557,16 @@ async def voice_chat_stream(
                 
                 logger.info(f"✅ LLM流式对话完成 [请求ID: {request_id}] - 总共处理 {chunk_count} 个文本块")
                 
+                # 🔧 关键修复：LLM流结束后，禁用重复检测处理最终文本
+                llm_stream_ended = True
+                
                 # 🔧 修复：处理最终剩余的文本，使用统一格式
                 final_text = text_processor.get_final_segment()
                 if final_text:
                     logger.info(f"🏁 处理最终文本段: '{final_text[:50]}...' (长度: {len(final_text)})")
                     
-                    # 🔧 关键修复：最终段落使用与普通段落相同的格式
                     final_segment_counter = text_processor.get_segment_counter()
-                    final_segment_id = f"{request_id}_seg_{final_segment_counter}"  # 注意：不使用_final
+                    final_segment_id = f"{request_id}_seg_{final_segment_counter}"
                     
                     # 发送最终文本段
                     text_data = {
@@ -568,15 +574,11 @@ async def voice_chat_stream(
                         "segment_id": final_segment_id,
                         "text": final_text
                     }
-                    
                     final_text_message = f"data: {json.dumps(text_data)}\n\n"
-                    logger.info(f"📤 发送最终文本段 [{final_segment_id}]: {len(final_text)} 字符")
                     yield final_text_message
                     
                     # 合成并发送最终语音
                     try:
-                        logger.info(f"🎵 开始合成最终语音 [{final_segment_id}]: '{final_text[:50]}...'")
-                        
                         synthesis_result = await managers['speech_processor'].synthesize(
                             text=final_text,
                             request_id=final_segment_id
@@ -593,23 +595,19 @@ async def voice_chat_stream(
                         else:
                             audio_base64 = base64.b64encode(audio_data).decode('utf-8')
                         
-                        # 🔧 关键修复：最终音频使用与普通段落相同的格式
                         audio_response = {
                             "type": "audio",
-                            "segment_id": final_segment_id,  # 统一格式
+                            "segment_id": final_segment_id,
                             "text": final_text,
                             "audio": audio_base64,
                             "format": synthesis_result.format
                         }
                         
                         final_audio_message = f"data: {json.dumps(audio_response)}\n\n"
-                        logger.info(f"🎵✅ 最终音频合成完成 [{final_segment_id}]: {len(audio_base64)} bytes base64")
                         yield final_audio_message
                         
                     except Exception as e:
-                        logger.error(f"❌ 最终音频合成失败 [{final_segment_id}]: {e}")
-                        error_message = f"data: {json.dumps({'type': 'error', 'message': f'最终音频合成失败: {str(e)}'})}\n\n"
-                        yield error_message
+                        logger.error(f"❌ 最终音频合成失败: {e}")
                 
                 # 发送完成信号
                 processing_time = time.time() - start_time
@@ -620,38 +618,28 @@ async def voice_chat_stream(
                     'segments_processed': text_processor.get_segment_counter()
                 }
                 done_message = f"data: {json.dumps(done_data)}\n\n"
-                logger.info(f"🎉 处理完成: {text_processor.get_segment_counter()} 个文本段，耗时 {processing_time:.2f}s")
                 yield done_message
                 
             except Exception as e:
-                logger.error(f"❌ LLM流式对话失败 [请求ID: {request_id}]: {str(e)}")
-                error_message = f"data: {json.dumps({'type': 'error', 'message': f'LLM对话失败: {str(e)}'})}\n\n"
+                logger.error(f"❌ LLM流式对话失败: {e}")
+                error_message = f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
                 yield error_message
             
-            logger.info(f"✅ 修复版流式语音对话完成 [请求ID: {request_id}]")
-            
         except Exception as e:
-            logger.error(f"❌ 流式语音对话失败 [请求ID: {request_id}]: {str(e)}")
+            logger.error(f"❌ 流式语音对话失败: {e}")
             error_message = f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
             yield error_message
-        
-        logger.info(f"🔚 修复版流式生成器结束 [请求ID: {request_id}]")
     
-    # 返回SSE流式响应
-    logger.info(f"🚀 返回StreamingResponse [请求ID: {request_id}]")
-    
-    response = StreamingResponse(
+    return StreamingResponse(
         create_stream_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Methods": "POST, OPTIONS", 
             "Access-Control-Allow-Headers": "Content-Type, Authorization",
             "X-Accel-Buffering": "no",
             "Transfer-Encoding": "chunked",
         }
     )
-    
-    return response
