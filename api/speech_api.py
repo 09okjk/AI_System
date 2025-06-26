@@ -651,8 +651,8 @@ async def voice_chat_stream(
                         text_processor.add_text(text_chunk)
                         
                         # 添加调试信息
-                        if chunk_count % 10 == 0:  # 每10个块输出一次状态
-                            text_processor.debug_state()
+                        # if chunk_count % 10 == 0:  # 每10个块输出一次状态
+                        #     text_processor.debug_state()
                         
                         # 检查是否有可处理的文本段
                         while True:
