@@ -253,7 +253,7 @@ class TextSegmentProcessor:
         self.found_content = False
         self.segment_counter = 0
         self.json_complete = False
-        self.processed_text = ""  # 已经处理过的文本，用于去重
+        self.last_processed_pos = 0  # 修改：使用位置而不是文本来跟踪处理进度
         
         self.logger.info(f"🔧 初始化文本分段处理器 [请求ID: {request_id}]")
     
@@ -291,16 +291,18 @@ class TextSegmentProcessor:
                 parsed = json.loads(self.json_buffer.strip())
                 if 'content' in parsed:
                     # JSON解析完成，只取content内容
-                    self.content_buffer = parsed['content']
+                    new_content = parsed['content']
                     self.current_page = parsed.get('page')
                     self.found_content = True
                     self.json_complete = True
-                    self.logger.info(f"✅ 完整解析JSON - 页码: {self.current_page}, 内容长度: {len(self.content_buffer)}")
+                    
+                    # 修改：只更新新增的内容，不重置已处理的位置
+                    if len(new_content) > len(self.content_buffer):
+                        self.content_buffer = new_content
+                        self.logger.info(f"✅ 完整解析JSON - 页码: {self.current_page}, 内容长度: {len(self.content_buffer)}")
                     
                     # 清空JSON缓冲区，避免重复处理
                     self.json_buffer = ""
-                    # 重置已处理文本
-                    self.processed_text = ""
             else:
                 # 尝试部分解析
                 self._try_partial_parse()
@@ -326,18 +328,19 @@ class TextSegmentProcessor:
         if not self.found_content:
             content_match = re.search(r'"content":\s*"([^"]*(?:\\.[^"]*)*)"', self.json_buffer)
             if content_match:
-                self.content_buffer = content_match.group(1).replace('\\"', '"').replace('\\n', '\n')
-                self.found_content = True
-                self.logger.info(f"📝 部分解析到content: {self.content_buffer[:50]}...")
-                # 重置已处理文本
-                self.processed_text = ""
+                new_content = content_match.group(1).replace('\\"', '"').replace('\\n', '\n')
+                # 修改：只在内容真正增长时才更新
+                if len(new_content) > len(self.content_buffer):
+                    self.content_buffer = new_content
+                    self.found_content = True
+                    self.logger.info(f"📝 部分解析到content: {self.content_buffer[:50]}...")
     
     def _reset_for_new_json(self, text_chunk: str):
         """为新的JSON重置状态"""
         self.json_buffer = text_chunk
         self.json_complete = False
-        # 保留已找到的内容和页码，但重置已处理文本
-        self.processed_text = self.content_buffer  # 保存当前内容为已处理
+        # 修改：不重置已处理位置，避免重复处理
+        # self.last_processed_pos 保持不变
     
     def _clean_text_chunk(self, text_chunk: str) -> str:
         """清理文本块"""
@@ -356,34 +359,40 @@ class TextSegmentProcessor:
         获取下一个可处理的文本段
         返回: (segment_text, has_more)
         """
-        if not self.found_content or len(self.content_buffer) < self.min_segment_length:
+        if not self.found_content or len(self.content_buffer) <= self.last_processed_pos:
             return "", False
         
-        # 检查是否有新的内容需要处理（避免重复处理）
-        if self.content_buffer == self.processed_text:
+        # 修改：检查剩余未处理的内容长度
+        remaining_content = self.content_buffer[self.last_processed_pos:]
+        if len(remaining_content) < self.min_segment_length:
             return "", False
         
-        # 找到分割点
+        # 找到分割点（在剩余内容中查找）
         best_split_pos = -1
         
         # 查找最佳分割点
         for marker in self.segment_markers:
-            pos = self.content_buffer.rfind(marker)
-            if pos > len(self.processed_text) and pos >= self.min_segment_length - 1:
-                if pos > best_split_pos:
-                    best_split_pos = pos
+            # 在剩余内容中查找分割点
+            pos = remaining_content.find(marker)
+            while pos != -1:
+                # 确保分割点满足最小长度要求
+                if pos >= self.min_segment_length - 1:
+                    if pos > best_split_pos:
+                        best_split_pos = pos
+                    break
+                # 继续查找下一个分割点
+                pos = remaining_content.find(marker, pos + 1)
         
-        if best_split_pos > len(self.processed_text):
-            # 提取文本段（从已处理位置到分割点）
-            start_pos = len(self.processed_text)
-            segment_text = self.content_buffer[start_pos:best_split_pos + 1].strip()
+        if best_split_pos > 0:
+            # 提取文本段
+            segment_text = remaining_content[:best_split_pos + 1].strip()
             
             if segment_text:
-                # 更新已处理文本
-                self.processed_text = self.content_buffer[:best_split_pos + 1]
+                # 更新已处理位置
+                self.last_processed_pos += best_split_pos + 1
                 self.segment_counter += 1
                 
-                self.logger.info(f"✂️ 提取文本段 #{self.segment_counter}: '{segment_text[:50]}...', 已处理: {len(self.processed_text)} / {len(self.content_buffer)}")
+                self.logger.info(f"✂️ 提取文本段 #{self.segment_counter}: '{segment_text[:50]}...', 已处理位置: {self.last_processed_pos} / {len(self.content_buffer)}")
                 
                 return segment_text, True
         
@@ -391,12 +400,12 @@ class TextSegmentProcessor:
     
     def get_final_segment(self) -> str:
         """获取最终剩余的文本段"""
-        if len(self.content_buffer) > len(self.processed_text):
-            final_text = self.content_buffer[len(self.processed_text):].strip()
+        if self.last_processed_pos < len(self.content_buffer):
+            final_text = self.content_buffer[self.last_processed_pos:].strip()
             
             if final_text and len(final_text) > 5:
                 self.segment_counter += 1
-                self.processed_text = self.content_buffer  # 标记为已全部处理
+                self.last_processed_pos = len(self.content_buffer)  # 标记为已全部处理
                 
                 self.logger.info(f"🏁 提取最终文本段 #{self.segment_counter}: '{final_text[:50]}...', 长度: {len(final_text)}")
                 return final_text
