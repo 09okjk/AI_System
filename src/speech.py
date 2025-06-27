@@ -18,7 +18,7 @@ import numpy as np
 
 from .logger import get_logger, log_speech_operation
 from .models import SpeechRecognitionResponse, SpeechSynthesisResponse, AudioFormat
-from .utils import generate_response_id
+from .utils import generate_response_id, AsyncCache, calculate_sha256
 
 logger = get_logger(__name__)
 
@@ -268,8 +268,13 @@ class SpeechSynthesizer:
         """合成语音（由子类实现）"""
         raise NotImplementedError
 class CosyVoiceSynthesizer(SpeechSynthesizer):
-    """CosyVoice 语音合成器 - 基于官方实现优化"""
+    """CosyVoice 语音合成器 - 基于官方实现优化，支持说话人缓存"""
     
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        # 初始化说话人缓存 - 使用较长的TTL (2小时)，因为说话人特征计算成本较高
+        self.speaker_cache = AsyncCache(default_ttl=7200)
+        
     async def _setup(self):
         """设置 CosyVoice - 根据官方最佳实践"""
         try:
@@ -334,6 +339,124 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         except Exception as e:
             logger.error(f"❌ CosyVoice 初始化失败: {str(e)}")
             raise
+    
+    async def _generate_speaker_id(self, reference_audio_path: str, reference_text: str) -> str:
+        """生成说话人ID - 基于参考音频和文本的哈希值"""
+        try:
+            # 读取参考音频文件内容
+            with open(reference_audio_path, 'rb') as f:
+                audio_content = f.read()
+            
+            # 结合音频内容和参考文本生成唯一ID
+            combined_content = audio_content + reference_text.encode('utf-8')
+            speaker_id = calculate_sha256(combined_content)[:16]  # 使用前16个字符作为ID
+            
+            logger.debug(f"生成说话人ID: {speaker_id} (音频: {Path(reference_audio_path).name}, 文本: {reference_text[:20]}...)")
+            return speaker_id
+            
+        except Exception as e:
+            logger.error(f"生成说话人ID失败: {str(e)}")
+            # 回退到基于路径和文本的简单哈希
+            fallback_content = f"{reference_audio_path}:{reference_text}".encode('utf-8')
+            return calculate_sha256(fallback_content)[:16]
+    
+    async def _cache_speaker(self, speaker_id: str, reference_audio_path: str, reference_text: str) -> bool:
+        """缓存说话人信息到CosyVoice模型中"""
+        try:
+            if self.model is None:
+                logger.warning("模型未初始化，无法缓存说话人")
+                return False
+            
+            # 检查说话人是否已缓存
+            cached_speaker = await self.speaker_cache.get(speaker_id)
+            if cached_speaker is not None:
+                logger.debug(f"说话人 {speaker_id} 已存在缓存中")
+                return True
+            
+            # 加载参考音频
+            reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
+            
+            # 使用CosyVoice的add_zero_shot_spk方法缓存说话人
+            if hasattr(self.model, 'add_zero_shot_spk'):
+                try:
+                    self.model.add_zero_shot_spk(speaker_id, reference_text, reference_audio)
+                    
+                    # 在本地缓存中记录此说话人已缓存
+                    speaker_info = {
+                        "speaker_id": speaker_id,
+                        "reference_audio_path": reference_audio_path,
+                        "reference_text": reference_text,
+                        "cached_at": time.time()
+                    }
+                    await self.speaker_cache.set(speaker_id, speaker_info)
+                    
+                    logger.info(f"✅ 说话人 {speaker_id} 已成功缓存到模型中")
+                    return True
+                    
+                except Exception as e:
+                    logger.error(f"使用add_zero_shot_spk缓存说话人失败: {str(e)}")
+                    return False
+            else:
+                # 如果模型不支持add_zero_shot_spk，只在本地缓存说话人信息
+                logger.warning("模型不支持add_zero_shot_spk方法，仅在本地缓存说话人信息")
+                speaker_info = {
+                    "speaker_id": speaker_id,
+                    "reference_audio_path": reference_audio_path,
+                    "reference_text": reference_text,
+                    "reference_audio": reference_audio,  # 缓存加载的音频
+                    "cached_at": time.time()
+                }
+                await self.speaker_cache.set(speaker_id, speaker_info)
+                logger.info(f"✅ 说话人 {speaker_id} 已缓存到本地")
+                return True
+                
+        except Exception as e:
+            logger.error(f"缓存说话人失败: {str(e)}")
+            return False
+    
+    async def _get_cached_speaker(self, speaker_id: str) -> Optional[Dict[str, Any]]:
+        """获取缓存的说话人信息"""
+        try:
+            speaker_info = await self.speaker_cache.get(speaker_id)
+            if speaker_info:
+                logger.debug(f"找到缓存的说话人: {speaker_id}")
+                return speaker_info
+            else:
+                logger.debug(f"未找到缓存的说话人: {speaker_id}")
+                return None
+        except Exception as e:
+            logger.error(f"获取缓存说话人失败: {str(e)}")
+            return None
+    
+    async def clear_speaker_cache(self) -> None:
+        """清空说话人缓存"""
+        try:
+            await self.speaker_cache.clear()
+            logger.info("✅ 说话人缓存已清空")
+        except Exception as e:
+            logger.error(f"清空说话人缓存失败: {str(e)}")
+    
+    async def get_cached_speakers(self) -> List[Dict[str, Any]]:
+        """获取所有缓存的说话人信息"""
+        try:
+            speakers = []
+            for key, (value, _) in self.speaker_cache.cache.items():
+                if isinstance(value, dict) and 'speaker_id' in value:
+                    # 不返回实际的音频数据，只返回元数据
+                    speaker_meta = {
+                        "speaker_id": value["speaker_id"],
+                        "reference_audio_path": value["reference_audio_path"],
+                        "reference_text": value["reference_text"],
+                        "cached_at": value["cached_at"]
+                    }
+                    speakers.append(speaker_meta)
+            
+            logger.debug(f"获取到 {len(speakers)} 个缓存的说话人")
+            return speakers
+            
+        except Exception as e:
+            logger.error(f"获取缓存说话人列表失败: {str(e)}")
+            return []
     
     async def synthesize(self, 
                         text: str, 
@@ -406,10 +529,16 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             raise Exception(f"CosyVoice 合成失败: {error_msg}")
     
     async def _zero_shot_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """零样本语音合成"""
-        # 获取参考音频
+        """零样本语音合成 - 支持说话人缓存"""
+        # 获取参考音频和文本
         reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
         reference_text = kwargs.get('reference_text', self.reference_text)
+        
+        # 验证参考文本
+        if not reference_text or reference_text.strip() == '参考音频文本':
+            # 提供更好的默认参考文本
+            reference_text = kwargs.get('reference_text', '这是一段清晰自然的中文语音参考样本')
+            logger.debug(f"使用默认参考文本: {reference_text}")
         
         if not reference_audio_path or not Path(reference_audio_path).exists():
             raise FileNotFoundError(f"参考音频文件不存在: {reference_audio_path}")
@@ -424,24 +553,71 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                 logger.error(f"参考音频转换失败: {str(e)}")
                 raise ValueError(f"参考音频格式转换失败: {str(e)}")
         
-        # 加载参考音频
-        reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
+        # 生成说话人ID
+        speaker_id = await self._generate_speaker_id(reference_audio_path, reference_text)
+        
+        # 尝试获取缓存的说话人
+        cached_speaker = await self._get_cached_speaker(speaker_id)
+        
+        # 如果没有缓存，则创建并缓存说话人
+        if cached_speaker is None:
+            logger.info(f"🎯 缓存新说话人: {speaker_id}")
+            cache_success = await self._cache_speaker(speaker_id, reference_audio_path, reference_text)
+            if not cache_success:
+                logger.warning("说话人缓存失败，使用传统零样本合成")
+        else:
+            logger.info(f"🎯 使用缓存的说话人: {speaker_id}")
         
         # 执行合成
         output_audio = None
         stream = kwargs.get('stream', False)
         
-        for i, result in enumerate(self.model.inference_zero_shot(
-            text, reference_text, reference_audio, stream=stream
-        )):
-            output_audio = result['tts_speech']
-            if not stream:  # 非流式模式只取第一个结果
-                break
+        # 尝试使用缓存的说话人进行合成
+        try:
+            if hasattr(self.model, 'inference_zero_shot_spk') and cached_speaker is not None:
+                # 使用缓存的说话人ID进行合成
+                logger.debug("使用缓存说话人进行合成")
+                for i, result in enumerate(self.model.inference_zero_shot_spk(
+                    text, speaker_id, stream=stream
+                )):
+                    output_audio = result['tts_speech']
+                    if not stream:  # 非流式模式只取第一个结果
+                        break
+            else:
+                # 回退到传统的零样本合成
+                logger.debug("使用传统零样本合成")
+                # 使用缓存的音频或重新加载
+                if cached_speaker and 'reference_audio' in cached_speaker:
+                    reference_audio = cached_speaker['reference_audio']
+                else:
+                    reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
+                
+                for i, result in enumerate(self.model.inference_zero_shot(
+                    text, reference_text, reference_audio, stream=stream
+                )):
+                    output_audio = result['tts_speech']
+                    if not stream:  # 非流式模式只取第一个结果
+                        break
+        
+        except Exception as e:
+            logger.warning(f"缓存说话人合成失败，回退到传统方法: {str(e)}")
+            # 最后的回退：重新加载音频进行传统合成
+            reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
+            for i, result in enumerate(self.model.inference_zero_shot(
+                text, reference_text, reference_audio, stream=stream
+            )):
+                output_audio = result['tts_speech']
+                if not stream:
+                    break
         
         if output_audio is None:
             raise Exception("零样本合成失败，未生成音频")
         
-        return await self._process_output_audio(output_audio)
+        # 在结果中添加说话人信息
+        result = await self._process_output_audio(output_audio)
+        result["speaker_id"] = speaker_id
+        result["reference_text"] = reference_text
+        return result
     
     async def _cross_lingual_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """跨语言语音合成"""
@@ -480,7 +656,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         return await self._process_output_audio(output_audio)
     
     async def _instruct_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """指令式语音合成"""
+        """指令式语音合成 - 支持说话人缓存"""
         reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
         instruction = kwargs.get('instruction', '用温和的中文女声朗读')
         
@@ -497,13 +673,34 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                 logger.error(f"参考音频转换失败: {str(e)}")
                 raise ValueError(f"参考音频格式转换失败: {str(e)}")
         
-        # 加载参考音频
-        reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
+        # 生成说话人ID（指令式合成也使用说话人缓存）
+        # 使用指令作为参考文本的一部分来生成唯一ID
+        reference_text_for_cache = f"[指令: {instruction}]"
+        speaker_id = await self._generate_speaker_id(reference_audio_path, reference_text_for_cache)
         
-        # 执行指令式合成 - 使用正确的方法名 inference_instruct2
+        # 尝试获取缓存的说话人
+        cached_speaker = await self._get_cached_speaker(speaker_id)
+        
+        # 如果没有缓存，则创建并缓存说话人（使用指令作为参考文本）
+        if cached_speaker is None:
+            logger.info(f"🎯 缓存新说话人（指令式）: {speaker_id}")
+            cache_success = await self._cache_speaker(speaker_id, reference_audio_path, reference_text_for_cache)
+            if not cache_success:
+                logger.warning("说话人缓存失败，使用传统指令式合成")
+        else:
+            logger.info(f"🎯 使用缓存的说话人（指令式）: {speaker_id}")
+        
+        # 执行指令式合成
         output_audio = None
         stream = kwargs.get('stream', False)
         
+        # 使用缓存的音频或重新加载
+        if cached_speaker and 'reference_audio' in cached_speaker:
+            reference_audio = cached_speaker['reference_audio']
+        else:
+            reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
+        
+        # 执行指令式合成 - 使用正确的方法名 inference_instruct2
         for i, result in enumerate(self.model.inference_instruct2(
             text, instruction, reference_audio, stream=stream
         )):
@@ -514,7 +711,11 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         if output_audio is None:
             raise Exception("指令式合成失败，未生成音频")
         
-        return await self._process_output_audio(output_audio)
+        # 在结果中添加说话人信息
+        result = await self._process_output_audio(output_audio)
+        result["speaker_id"] = speaker_id
+        result["instruction"] = instruction
+        return result
     
     async def _process_output_audio(self, output_audio) -> Dict[str, Any]:
         """处理输出音频"""
@@ -553,6 +754,20 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             # 提供更详细的错误信息
             logger.error(f"❌ 音频处理失败: {str(e)}")
             raise Exception(f"音频处理失败: {str(e)}")
+    
+    async def cleanup(self):
+        """清理CosyVoice合成器资源"""
+        try:
+            # 清理说话人缓存
+            await self.clear_speaker_cache()
+            
+            # 清理模型资源（如果需要）
+            if hasattr(self.model, 'cleanup'):
+                self.model.cleanup()
+            
+            logger.info("✅ CosyVoice合成器资源清理完成")
+        except Exception as e:
+            logger.warning(f"清理CosyVoice合成器资源时出错: {str(e)}")
 
 class MockSynthesizer(SpeechSynthesizer):
     """模拟语音合成器"""
@@ -854,6 +1069,44 @@ class SpeechProcessor:
                     voices[name] = ["default"]
         
         return voices
+    
+    async def get_cached_speakers(self) -> Dict[str, List[Dict[str, Any]]]:
+        """获取所有合成器的缓存说话人信息"""
+        speakers = {}
+        
+        for name, synthesizer in self.synthesizers.items():
+            if hasattr(synthesizer, 'get_cached_speakers'):
+                try:
+                    speakers[name] = await synthesizer.get_cached_speakers()
+                except Exception as e:
+                    logger.error(f"获取 {name} 合成器的缓存说话人失败: {str(e)}")
+                    speakers[name] = []
+            else:
+                speakers[name] = []
+        
+        return speakers
+    
+    async def clear_speaker_cache(self, synthesizer_name: Optional[str] = None) -> Dict[str, bool]:
+        """清空指定合成器或所有合成器的说话人缓存"""
+        results = {}
+        
+        target_synthesizers = [synthesizer_name] if synthesizer_name else self.synthesizers.keys()
+        
+        for name in target_synthesizers:
+            if name in self.synthesizers:
+                synthesizer = self.synthesizers[name]
+                if hasattr(synthesizer, 'clear_speaker_cache'):
+                    try:
+                        await synthesizer.clear_speaker_cache()
+                        results[name] = True
+                        logger.info(f"✅ 已清空 {name} 合成器的说话人缓存")
+                    except Exception as e:
+                        logger.error(f"清空 {name} 合成器的说话人缓存失败: {str(e)}")
+                        results[name] = False
+                else:
+                    results[name] = False
+        
+        return results
 
     async def cleanup(self):
         """清理资源"""
