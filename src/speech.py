@@ -985,7 +985,7 @@ class SpeechProcessor:
                 'model_dir': os.getenv('COSYVOICE_MODEL_DIR', '/home/rh/Program/MCP_Tools/CosyVoice/pretrained_models/CosyVoice2-0.5B'),
                 'cosyvoice_path': os.getenv('COSYVOICE_PATH', 'tools/CosyVoice'),
                 'reference_audio': os.getenv('COSYVOICE_REF_AUDIO', None),
-                'reference_text': os.getenv('COSYVOICE_REF_TEXT', '参考音频文本'),
+                'reference_text': os.getenv('COSYVOICE_REF_TEXT', '你好，我是青岛儒海船舶工程股份有限公司的前台解说，有什么可以帮到你的吗？'),
                 'load_jit': os.getenv('COSYVOICE_LOAD_JIT', 'false').lower() == 'true',
                 'load_trt': os.getenv('COSYVOICE_LOAD_TRT', 'false').lower() == 'true',
                 'fp16': os.getenv('COSYVOICE_FP16', 'false').lower() == 'true'
