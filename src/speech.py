@@ -262,8 +262,8 @@ class SpeechSynthesizer:
                         text: str, 
                         voice: Optional[str] = None,
                         language: str = "zh-CN",
-                        speed: float = 1.0,
-                        pitch: float = 1.0,
+                        speed: float = 1.2,
+                        pitch: float = 3.0,
                         **kwargs) -> Dict[str, Any]:
         """合成语音（由子类实现）"""
         raise NotImplementedError
@@ -339,8 +339,8 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                         text: str, 
                         voice: Optional[str] = None,
                         language: str = "zh-CN",
-                        speed: float = 1.0,
-                        pitch: float = 1.3,
+                        speed: float = 1.2,
+                        pitch: float = 3.0,
                         synthesis_mode: str = "zero_shot",
                         **kwargs) -> Dict[str, Any]:
         """CosyVoice 语音合成 - 支持多种合成模式"""
@@ -764,8 +764,8 @@ class SpeechProcessor:
                         text: str,
                         voice: Optional[str] = None,
                         language: str = "zh-CN",
-                        speed: float = 1.0,
-                        pitch: float = 1.0,
+                        speed: float = 1.2,
+                        pitch: float = 3.0,
                         tts_model: Optional[str] = None,
                         request_id: Optional[str] = None,
                         **kwargs) -> SpeechSynthesisResponse:
