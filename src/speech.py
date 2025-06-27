@@ -588,13 +588,21 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             raise Exception(f"CosyVoice 合成失败: {error_msg}")
     
     async def _get_or_create_speaker(self, 
-                                   speaker_id: Optional[str] = None,
-                                   reference_audio: Optional[str] = None,
-                                   reference_text: Optional[str] = None) -> str:
-        """获取或创建speaker"""
+                                speaker_id: Optional[str] = None,
+                                reference_audio: Optional[str] = None,
+                                reference_text: Optional[str] = None) -> str:
+        """获取或创建speaker - 增强验证"""
         try:
-            # 如果指定了speaker_id且存在，直接使用
+            # 如果指定了speaker_id且存在，验证其完整性
             if speaker_id and speaker_id in self.speakers_cache:
+                speaker_info = self.speakers_cache[speaker_id]
+                
+                # 验证speaker信息完整性
+                if not speaker_info.get('reference_text'):
+                    logger.warning(f"⚠️ Speaker {speaker_id} 缺少参考文本")
+                if not speaker_info.get('reference_audio_path') or not Path(speaker_info['reference_audio_path']).exists():
+                    logger.warning(f"⚠️ Speaker {speaker_id} 参考音频文件不存在")
+                    
                 logger.info(f"📢 使用已存在的speaker: {speaker_id}")
                 return speaker_id
             
@@ -616,24 +624,48 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             raise
     
     async def _zero_shot_synthesis_with_speaker(self, text: str, speaker_id: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """使用指定speaker进行零样本语音合成"""
+        """使用指定speaker进行零样本语音合成 - 修复版本"""
         try:
-            # 使用保存的speaker ID进行合成
+            # 获取speaker的参考信息
+            if speaker_id not in self.speakers_cache:
+                raise ValueError(f"Speaker {speaker_id} 不存在")
+            
+            speaker_info = self.speakers_cache[speaker_id]
+            reference_text = speaker_info['reference_text']
+            reference_audio_path = speaker_info['reference_audio_path']
+            
+            # 准备参考音频
+            processed_audio_path = await self._prepare_reference_audio(reference_audio_path)
+            reference_audio = self.load_wav(processed_audio_path, self.model.sample_rate)
+            
             output_audio = None
             stream = kwargs.get('stream', False)
             
             logger.info(f"🎤 开始零样本合成 - Speaker: {speaker_id}, 文本: {text[:50]}...")
+            logger.info(f"📝 使用参考文本: {reference_text[:30]}...")
             
-            # 根据官方示例，使用空的reference_text和reference_audio，通过speaker_id指定音色
-            for i, result in enumerate(self.model.inference_zero_shot(
-                text, '', '', zero_shot_spk_id=speaker_id, stream=stream
-            )):
-                output_audio = result['tts_speech']
-                logger.info(f"🔊 生成音频张量形状: {output_audio.shape}")
-                logger.info(f"🔊 音频数据类型: {output_audio.dtype}")
-                logger.info(f"🔊 音频值范围: [{output_audio.min():.6f}, {output_audio.max():.6f}]")
-                if not stream:  # 非流式模式只取第一个结果
-                    break
+            # 方法1：使用完整的参考音频和文本（推荐）
+            try:
+                for i, result in enumerate(self.model.inference_zero_shot(
+                    text, reference_text, reference_audio, stream=stream
+                )):
+                    output_audio = result['tts_speech']
+                    logger.info(f"🔊 生成音频张量形状: {output_audio.shape}")
+                    logger.info(f"🔊 音频数据类型: {output_audio.dtype}")
+                    logger.info(f"🔊 音频值范围: [{output_audio.min():.6f}, {output_audio.max():.6f}]")
+                    if not stream:
+                        break
+            except Exception as e:
+                logger.warning(f"⚠️ 方法1失败，尝试方法2: {str(e)}")
+                
+                # 方法2：尝试使用speaker_id但提供参考信息
+                for i, result in enumerate(self.model.inference_zero_shot(
+                    text, reference_text, reference_audio, zero_shot_spk_id=speaker_id, stream=stream
+                )):
+                    output_audio = result['tts_speech']
+                    logger.info(f"🔊 生成音频张量形状: {output_audio.shape}")
+                    if not stream:
+                        break
             
             if output_audio is None:
                 raise Exception("零样本合成失败，未生成音频")
