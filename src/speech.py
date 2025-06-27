@@ -509,7 +509,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                         language: str = "zh-CN",
                         speed: float = 1.0,
                         pitch: float = 1.0,
-                        synthesis_mode: str = "zero_shot",
+                        synthesis_mode: str = "instruct",
                         reference_audio: Optional[str] = None,
                         reference_text: Optional[str] = None,
                         speaker_id: Optional[str] = None,
