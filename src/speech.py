@@ -1,7 +1,6 @@
 """
-语音处理器 - 优化版本
-负责语音识别和语音合成功能
-基于 SenseVoice 和 CosyVoice 官方实现优化
+语音处理器 - 修复音频输出问题
+主要修复CosyVoice音频输出异常的问题
 """
 
 import asyncio
@@ -15,6 +14,7 @@ from pathlib import Path
 import json
 import os
 import numpy as np
+import torch
 
 from .logger import get_logger, log_speech_operation
 from .models import SpeechRecognitionResponse, SpeechSynthesisResponse, AudioFormat
@@ -269,7 +269,7 @@ class SpeechSynthesizer:
         raise NotImplementedError
 
 class CosyVoiceSynthesizer(SpeechSynthesizer):
-    """CosyVoice 语音合成器 - 基于官方实现优化，支持音色一致性"""
+    """CosyVoice 语音合成器 - 修复音频输出问题"""
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -341,6 +341,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             
             logger.info(f"✅ CosyVoice 模型初始化成功 - 模型路径: {model_dir}")
             logger.info(f"📢 默认speaker ID: {self.default_speaker_id}")
+            logger.info(f"🎵 模型采样率: {self.model.sample_rate}")
             
         except ImportError as e:
             logger.warning(f"⚠️ CosyVoice 未正确安装: {str(e)}")
@@ -514,7 +515,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                         speaker_id: Optional[str] = None,
                         instruction: Optional[str] = None,
                         **kwargs) -> Dict[str, Any]:
-        """CosyVoice 语音合成 - 支持音色一致性的多种合成模式"""
+        """CosyVoice 语音合成 - 修复音频输出问题"""
         start_time = time.time()
         
         try:
@@ -621,11 +622,16 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             output_audio = None
             stream = kwargs.get('stream', False)
             
+            logger.info(f"🎤 开始零样本合成 - Speaker: {speaker_id}, 文本: {text[:50]}...")
+            
             # 根据官方示例，使用空的reference_text和reference_audio，通过speaker_id指定音色
             for i, result in enumerate(self.model.inference_zero_shot(
                 text, '', '', zero_shot_spk_id=speaker_id, stream=stream
             )):
                 output_audio = result['tts_speech']
+                logger.info(f"🔊 生成音频张量形状: {output_audio.shape}")
+                logger.info(f"🔊 音频数据类型: {output_audio.dtype}")
+                logger.info(f"🔊 音频值范围: [{output_audio.min():.6f}, {output_audio.max():.6f}]")
                 if not stream:  # 非流式模式只取第一个结果
                     break
             
@@ -711,41 +717,107 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             raise
     
     async def _process_output_audio(self, output_audio) -> Dict[str, Any]:
-        """处理输出音频"""
+        """处理输出音频 - 修复版本"""
         import io
-        
-        # 转换为字节数据
-        buffer = io.BytesIO()
+        import tempfile
         
         try:
-            # 明确指定音频格式和位深度
-            self.torchaudio.save(
-                buffer, 
-                output_audio, 
-                self.model.sample_rate, 
-                format='wav',
-                bits_per_sample=16,
-                encoding='PCM_S'
-            )
-            buffer.seek(0)
-            audio_data = buffer.read()
+            logger.info(f"🔧 开始处理音频 - 张量形状: {output_audio.shape}")
+            logger.info(f"🔧 音频数据类型: {output_audio.dtype}")
+            logger.info(f"🔧 设备: {output_audio.device}")
+            logger.info(f"🔧 采样率: {self.model.sample_rate}")
             
-            # 编码为base64
-            audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+            # 确保音频在CPU上且为正确的数据类型
+            if output_audio.device.type != 'cpu':
+                output_audio = output_audio.cpu()
+                logger.info("📱 音频已移至CPU")
             
-            # 计算时长
-            duration = output_audio.shape[1] / self.model.sample_rate
+            # 确保音频为float32类型
+            if output_audio.dtype != torch.float32:
+                output_audio = output_audio.float()
+                logger.info(f"🔄 音频类型已转换为: {output_audio.dtype}")
             
-            return {
-                "audio_data": audio_base64,
-                "format": AudioFormat.WAV,
-                "duration": duration,
-                "model_used": "cosyvoice",
-                "sample_rate": self.model.sample_rate
-            }
+            # 检查音频维度，确保是正确的格式 [channels, samples]
+            if len(output_audio.shape) == 1:
+                # 如果是一维，添加通道维度
+                output_audio = output_audio.unsqueeze(0)
+                logger.info(f"📏 添加通道维度: {output_audio.shape}")
+            elif len(output_audio.shape) == 3:
+                # 如果是三维，去除多余的维度
+                output_audio = output_audio.squeeze(0)
+                logger.info(f"📏 压缩维度: {output_audio.shape}")
+            
+            # 检查通道数，如果是多通道，只使用第一个通道
+            if output_audio.shape[0] > 1:
+                output_audio = output_audio[0:1]  # 只保留第一个通道
+                logger.info(f"🎵 使用单声道: {output_audio.shape}")
+            
+            # 归一化音频到合适的范围
+            max_val = output_audio.abs().max()
+            if max_val > 1.0:
+                output_audio = output_audio / max_val
+                logger.info(f"🔊 音频已归一化，最大值从 {max_val:.6f} 归一化到 1.0")
+            
+            # 检查音频是否包含NaN或无穷大
+            if torch.isnan(output_audio).any():
+                logger.error("❌ 检测到NaN值，用零替换")
+                output_audio = torch.nan_to_num(output_audio, nan=0.0)
+            
+            if torch.isinf(output_audio).any():
+                logger.error("❌ 检测到无穷大值，用零替换")
+                output_audio = torch.nan_to_num(output_audio, posinf=0.0, neginf=0.0)
+            
+            # 使用临时文件保存音频
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                temp_audio_path = temp_file.name
+            
+            try:
+                # 使用torchaudio保存音频
+                self.torchaudio.save(
+                    temp_audio_path,
+                    output_audio,
+                    self.model.sample_rate,
+                    format='wav',
+                    encoding='PCM_S',
+                    bits_per_sample=16
+                )
+                
+                logger.info(f"💾 音频已保存到临时文件: {temp_audio_path}")
+                
+                # 读取保存的WAV文件
+                with open(temp_audio_path, 'rb') as f:
+                    audio_data = f.read()
+                
+                logger.info(f"📁 WAV文件大小: {len(audio_data)} 字节")
+                
+                # 编码为base64
+                audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                
+                # 计算时长
+                duration = output_audio.shape[1] / self.model.sample_rate
+                
+                logger.info(f"✅ 音频处理完成 - 时长: {duration:.2f}s, Base64长度: {len(audio_base64)}")
+                
+                return {
+                    "audio_data": audio_base64,
+                    "format": AudioFormat.WAV,
+                    "duration": duration,
+                    "model_used": "cosyvoice",
+                    "sample_rate": self.model.sample_rate,
+                    "channels": output_audio.shape[0],
+                    "audio_shape": list(output_audio.shape)
+                }
+                
+            finally:
+                # 清理临时文件
+                try:
+                    Path(temp_audio_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                    
         except Exception as e:
-            # 提供更详细的错误信息
             logger.error(f"❌ 音频处理失败: {str(e)}")
+            logger.error(f"音频张量信息: shape={output_audio.shape}, dtype={output_audio.dtype}")
             raise Exception(f"音频处理失败: {str(e)}")
     
     async def get_speaker_list(self) -> Dict[str, Any]:
@@ -820,7 +892,7 @@ class MockSynthesizer(SpeechSynthesizer):
         }
 
 class SpeechProcessor:
-    """语音处理器主类 - 优化版本"""
+    """语音处理器主类 - 修复版本"""
     
     def __init__(self):
         self.recognizers: Dict[str, SpeechRecognizer] = {}
@@ -860,7 +932,7 @@ class SpeechProcessor:
 
     async def initialize(self):
         """初始化语音处理器"""
-        logger.info("🔧 初始化语音处理器 - 优化版本")
+        logger.info("🔧 初始化语音处理器 - 修复版本")
         
         # 尝试初始化可用的识别器
         await self._try_initialize_recognizers()
@@ -994,7 +1066,7 @@ class SpeechProcessor:
                         tts_model: Optional[str] = None,
                         request_id: Optional[str] = None,
                         **kwargs) -> SpeechSynthesisResponse:
-        """语音合成 - 优化版，支持音色一致性"""
+        """语音合成 - 修复版本，支持音色一致性"""
         if not self.is_initialized:
             raise RuntimeError("语音处理器未初始化")
         
