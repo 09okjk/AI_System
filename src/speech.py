@@ -267,9 +267,17 @@ class SpeechSynthesizer:
                         **kwargs) -> Dict[str, Any]:
         """合成语音（由子类实现）"""
         raise NotImplementedError
+
 class CosyVoiceSynthesizer(SpeechSynthesizer):
-    """CosyVoice 语音合成器 - 基于官方实现优化"""
+    """CosyVoice 语音合成器 - 基于官方实现优化，支持音色一致性"""
     
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        # Speaker管理
+        self.speakers_cache = {}  # 缓存已加载的speaker
+        self.default_speaker_id = None  # 默认speaker ID
+        self.speaker_info_file = None  # speaker信息文件路径
+        
     async def _setup(self):
         """设置 CosyVoice - 根据官方最佳实践"""
         try:
@@ -322,11 +330,17 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             self.load_wav = load_wav
             self.torchaudio = torchaudio
             
-            # 参考音频设置
-            self.reference_audio_path = self.config.get('reference_audio', None)
-            self.reference_text = self.config.get('reference_text', '参考音频文本')
+            # 设置speaker信息文件路径
+            self.speaker_info_file = Path(model_dir) / "custom_speakers.json"
+            
+            # 加载已保存的speaker信息
+            await self._load_saved_speakers()
+            
+            # 设置默认参考音频和speaker
+            await self._setup_default_speaker()
             
             logger.info(f"✅ CosyVoice 模型初始化成功 - 模型路径: {model_dir}")
+            logger.info(f"📢 默认speaker ID: {self.default_speaker_id}")
             
         except ImportError as e:
             logger.warning(f"⚠️ CosyVoice 未正确安装: {str(e)}")
@@ -335,15 +349,172 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             logger.error(f"❌ CosyVoice 初始化失败: {str(e)}")
             raise
     
+    async def _load_saved_speakers(self):
+        """加载已保存的speaker信息"""
+        try:
+            if self.speaker_info_file and Path(self.speaker_info_file).exists():
+                with open(self.speaker_info_file, 'r', encoding='utf-8') as f:
+                    speaker_data = json.load(f)
+                    
+                # 尝试加载保存的speaker信息到模型中
+                if hasattr(self.model, 'load_spkinfo') and 'speakers' in speaker_data:
+                    try:
+                        # CosyVoice2 可能需要特定的speaker信息格式
+                        self.model.load_spkinfo()
+                        logger.info(f"✅ 已加载 {len(speaker_data['speakers'])} 个保存的speaker")
+                    except Exception as e:
+                        logger.warning(f"⚠️ 加载speaker信息失败: {str(e)}")
+                
+                self.speakers_cache = speaker_data.get('speakers', {})
+                self.default_speaker_id = speaker_data.get('default_speaker_id')
+                
+                logger.info(f"📂 加载了 {len(self.speakers_cache)} 个缓存的speaker")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ 加载speaker信息文件失败: {str(e)}")
+            self.speakers_cache = {}
+    
+    async def _setup_default_speaker(self):
+        """设置默认speaker"""
+        reference_audio_path = self.config.get('reference_audio', None)
+        reference_text = self.config.get('reference_text', '参考音频文本')
+        
+        if reference_audio_path and Path(reference_audio_path).exists():
+            try:
+                # 如果没有默认speaker，创建一个
+                if not self.default_speaker_id:
+                    speaker_id = await self._add_speaker(
+                        reference_text=reference_text,
+                        reference_audio_path=reference_audio_path,
+                        speaker_id='default_speaker'
+                    )
+                    self.default_speaker_id = speaker_id
+                    logger.info(f"✅ 创建默认speaker: {speaker_id}")
+                else:
+                    logger.info(f"📢 使用已存在的默认speaker: {self.default_speaker_id}")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ 设置默认speaker失败: {str(e)}")
+                self.default_speaker_id = None
+        else:
+            logger.warning("⚠️ 未配置默认参考音频，需要在合成时提供")
+    
+    async def _add_speaker(self, reference_text: str, reference_audio_path: str, speaker_id: str = None) -> str:
+        """添加新的speaker到模型中"""
+        try:
+            # 生成speaker ID
+            if not speaker_id:
+                speaker_id = f"speaker_{uuid.uuid4().hex[:8]}"
+            
+            # 检查speaker是否已存在
+            if speaker_id in self.speakers_cache:
+                logger.info(f"📢 Speaker {speaker_id} 已存在，跳过添加")
+                return speaker_id
+            
+            # 确保音频格式正确
+            processed_audio_path = await self._prepare_reference_audio(reference_audio_path)
+            
+            # 加载参考音频
+            reference_audio = self.load_wav(processed_audio_path, self.model.sample_rate)
+            
+            # 添加zero-shot speaker到模型
+            success = self.model.add_zero_shot_spk(reference_text, reference_audio, speaker_id)
+            
+            if success:
+                # 缓存speaker信息
+                self.speakers_cache[speaker_id] = {
+                    'reference_text': reference_text,
+                    'reference_audio_path': reference_audio_path,
+                    'created_at': datetime.utcnow().isoformat()
+                }
+                
+                # 保存speaker信息
+                await self._save_speaker_info()
+                
+                logger.info(f"✅ 成功添加speaker: {speaker_id}")
+                return speaker_id
+            else:
+                raise Exception(f"模型添加speaker失败: {speaker_id}")
+                
+        except Exception as e:
+            logger.error(f"❌ 添加speaker失败: {str(e)}")
+            raise
+    
+    async def _prepare_reference_audio(self, audio_path: str) -> str:
+        """准备参考音频（确保格式正确）"""
+        try:
+            # 检查音频文件是否存在
+            if not Path(audio_path).exists():
+                raise FileNotFoundError(f"参考音频文件不存在: {audio_path}")
+            
+            # 检查音频格式
+            audio_ext = Path(audio_path).suffix.lower()
+            
+            # 如果不是WAV格式，进行转换
+            if audio_ext != '.wav':
+                logger.info(f"参考音频非WAV格式 ({audio_ext})，进行格式转换")
+                converted_path = convert_audio_to_wav(audio_path, sample_rate=self.model.sample_rate)
+                return converted_path
+            else:
+                # 验证采样率是否正确
+                try:
+                    import librosa
+                    y, sr = librosa.load(audio_path, sr=None)
+                    if sr != self.model.sample_rate:
+                        logger.info(f"参考音频采样率不匹配 ({sr} vs {self.model.sample_rate})，重新采样")
+                        converted_path = convert_audio_to_wav(audio_path, sample_rate=self.model.sample_rate)
+                        return converted_path
+                except Exception:
+                    pass  # 如果检查失败，直接使用原文件
+                
+                return audio_path
+                
+        except Exception as e:
+            logger.error(f"❌ 准备参考音频失败: {str(e)}")
+            raise
+    
+    async def _save_speaker_info(self):
+        """保存speaker信息到文件"""
+        try:
+            if self.speaker_info_file:
+                speaker_data = {
+                    'speakers': self.speakers_cache,
+                    'default_speaker_id': self.default_speaker_id,
+                    'updated_at': datetime.utcnow().isoformat()
+                }
+                
+                # 确保目录存在
+                self.speaker_info_file.parent.mkdir(parents=True, exist_ok=True)
+                
+                # 保存到文件
+                with open(self.speaker_info_file, 'w', encoding='utf-8') as f:
+                    json.dump(speaker_data, f, ensure_ascii=False, indent=2)
+                
+                # 同时保存模型的speaker信息
+                if hasattr(self.model, 'save_spkinfo'):
+                    try:
+                        self.model.save_spkinfo()
+                    except Exception as e:
+                        logger.warning(f"⚠️ 保存模型speaker信息失败: {str(e)}")
+                
+                logger.info(f"💾 Speaker信息已保存到: {self.speaker_info_file}")
+                
+        except Exception as e:
+            logger.error(f"❌ 保存speaker信息失败: {str(e)}")
+    
     async def synthesize(self, 
                         text: str, 
                         voice: Optional[str] = None,
                         language: str = "zh-CN",
                         speed: float = 1.0,
                         pitch: float = 1.0,
-                        synthesis_mode: str = "instruct",
+                        synthesis_mode: str = "zero_shot",
+                        reference_audio: Optional[str] = None,
+                        reference_text: Optional[str] = None,
+                        speaker_id: Optional[str] = None,
+                        instruction: Optional[str] = None,
                         **kwargs) -> Dict[str, Any]:
-        """CosyVoice 语音合成 - 支持多种合成模式"""
+        """CosyVoice 语音合成 - 支持音色一致性的多种合成模式"""
         start_time = time.time()
         
         try:
@@ -370,26 +541,36 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                     "synthesis_mode": synthesis_mode
                 }
             
+            # 获取或创建speaker
+            target_speaker_id = await self._get_or_create_speaker(
+                speaker_id=speaker_id,
+                reference_audio=reference_audio,
+                reference_text=reference_text
+            )
+            
             # 根据合成模式选择不同的方法
             if synthesis_mode == "zero_shot":
-                result = await self._zero_shot_synthesis(text, kwargs)
+                result = await self._zero_shot_synthesis_with_speaker(text, target_speaker_id, kwargs)
             elif synthesis_mode == "cross_lingual":
-                result = await self._cross_lingual_synthesis(text, kwargs)
+                result = await self._cross_lingual_synthesis_with_speaker(text, target_speaker_id, kwargs)
             elif synthesis_mode == "instruct":
-                result = await self._instruct_synthesis(text, kwargs)
+                result = await self._instruct_synthesis_with_speaker(text, target_speaker_id, instruction, kwargs)
             else:
                 # 默认使用零样本合成
-                result = await self._zero_shot_synthesis(text, kwargs)
+                result = await self._zero_shot_synthesis_with_speaker(text, target_speaker_id, kwargs)
             
             processing_time = time.time() - start_time
             result["processing_time"] = processing_time
             result["synthesis_mode"] = synthesis_mode
+            result["speaker_id"] = target_speaker_id
             
             log_speech_operation(
                 logger, "synthesis", "cosyvoice", 
                 len(text), len(result["audio_data"]), processing_time, 
                 True, language
             )
+            
+            logger.info(f"✅ 合成完成 - Speaker: {target_speaker_id}, 模式: {synthesis_mode}, 时长: {result.get('duration', 0):.2f}s")
             
             return result
             
@@ -405,116 +586,129 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             
             raise Exception(f"CosyVoice 合成失败: {error_msg}")
     
-    async def _zero_shot_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """零样本语音合成"""
-        # 获取参考音频
-        reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
-        reference_text = kwargs.get('reference_text', self.reference_text)
-        
-        if not reference_audio_path or not Path(reference_audio_path).exists():
-            raise FileNotFoundError(f"参考音频文件不存在: {reference_audio_path}")
-        
-        # 检查是否需要转换音频格式
-        reference_audio_ext = Path(reference_audio_path).suffix.lower()
-        if reference_audio_ext != '.wav':
-            logger.info(f"参考音频非WAV格式 ({reference_audio_ext})，进行格式转换")
-            try:
-                reference_audio_path = convert_audio_to_wav(reference_audio_path, sample_rate=self.model.sample_rate)
-            except Exception as e:
-                logger.error(f"参考音频转换失败: {str(e)}")
-                raise ValueError(f"参考音频格式转换失败: {str(e)}")
-        
-        # 加载参考音频
-        reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
-        
-        # 执行合成
-        output_audio = None
-        stream = kwargs.get('stream', False)
-        
-        for i, result in enumerate(self.model.inference_zero_shot(
-            text, reference_text, reference_audio, stream=stream
-        )):
-            output_audio = result['tts_speech']
-            if not stream:  # 非流式模式只取第一个结果
-                break
-        
-        if output_audio is None:
-            raise Exception("零样本合成失败，未生成音频")
-        
-        return await self._process_output_audio(output_audio)
+    async def _get_or_create_speaker(self, 
+                                   speaker_id: Optional[str] = None,
+                                   reference_audio: Optional[str] = None,
+                                   reference_text: Optional[str] = None) -> str:
+        """获取或创建speaker"""
+        try:
+            # 如果指定了speaker_id且存在，直接使用
+            if speaker_id and speaker_id in self.speakers_cache:
+                logger.info(f"📢 使用已存在的speaker: {speaker_id}")
+                return speaker_id
+            
+            # 如果提供了新的参考音频，创建新speaker
+            if reference_audio and reference_text:
+                new_speaker_id = speaker_id or f"custom_speaker_{uuid.uuid4().hex[:8]}"
+                return await self._add_speaker(reference_text, reference_audio, new_speaker_id)
+            
+            # 使用默认speaker
+            if self.default_speaker_id:
+                logger.info(f"📢 使用默认speaker: {self.default_speaker_id}")
+                return self.default_speaker_id
+            
+            # 如果没有任何可用speaker，抛出错误
+            raise ValueError("没有可用的speaker，请提供reference_audio和reference_text")
+            
+        except Exception as e:
+            logger.error(f"❌ 获取或创建speaker失败: {str(e)}")
+            raise
     
-    async def _cross_lingual_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """跨语言语音合成"""
-        reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
-        
-        if not reference_audio_path or not Path(reference_audio_path).exists():
-            raise FileNotFoundError(f"参考音频文件不存在: {reference_audio_path}")
-        
-        # 检查是否需要转换音频格式
-        reference_audio_ext = Path(reference_audio_path).suffix.lower()
-        if reference_audio_ext != '.wav':
-            logger.info(f"参考音频非WAV格式 ({reference_audio_ext})，进行格式转换")
-            try:
-                reference_audio_path = convert_audio_to_wav(reference_audio_path, sample_rate=self.model.sample_rate)
-            except Exception as e:
-                logger.error(f"参考音频转换失败: {str(e)}")
-                raise ValueError(f"参考音频格式转换失败: {str(e)}")
-        
-        # 加载参考音频
-        reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
-        
-        # 执行跨语言合成
-        output_audio = None
-        stream = kwargs.get('stream', False)
-        
-        for i, result in enumerate(self.model.inference_cross_lingual(
-            text, reference_audio, stream=stream
-        )):
-            output_audio = result['tts_speech']
-            if not stream:
-                break
-        
-        if output_audio is None:
-            raise Exception("跨语言合成失败，未生成音频")
-        
-        return await self._process_output_audio(output_audio)
+    async def _zero_shot_synthesis_with_speaker(self, text: str, speaker_id: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """使用指定speaker进行零样本语音合成"""
+        try:
+            # 使用保存的speaker ID进行合成
+            output_audio = None
+            stream = kwargs.get('stream', False)
+            
+            # 根据官方示例，使用空的reference_text和reference_audio，通过speaker_id指定音色
+            for i, result in enumerate(self.model.inference_zero_shot(
+                text, '', '', zero_shot_spk_id=speaker_id, stream=stream
+            )):
+                output_audio = result['tts_speech']
+                if not stream:  # 非流式模式只取第一个结果
+                    break
+            
+            if output_audio is None:
+                raise Exception("零样本合成失败，未生成音频")
+            
+            return await self._process_output_audio(output_audio)
+            
+        except Exception as e:
+            logger.error(f"❌ 零样本合成失败: {str(e)}")
+            raise
     
-    async def _instruct_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """指令式语音合成"""
-        reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
-        instruction = kwargs.get('instruction', '用温和的中文女声朗读')
-        
-        if not reference_audio_path or not Path(reference_audio_path).exists():
-            raise FileNotFoundError(f"参考音频文件不存在: {reference_audio_path}")
-        
-        # 检查是否需要转换音频格式
-        reference_audio_ext = Path(reference_audio_path).suffix.lower()
-        if reference_audio_ext != '.wav':
-            logger.info(f"参考音频非WAV格式 ({reference_audio_ext})，进行格式转换")
-            try:
-                reference_audio_path = convert_audio_to_wav(reference_audio_path, sample_rate=self.model.sample_rate)
-            except Exception as e:
-                logger.error(f"参考音频转换失败: {str(e)}")
-                raise ValueError(f"参考音频格式转换失败: {str(e)}")
-        
-        # 加载参考音频
-        reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
-        
-        # 执行指令式合成 - 使用正确的方法名 inference_instruct2
-        output_audio = None
-        stream = kwargs.get('stream', False)
-        
-        for i, result in enumerate(self.model.inference_instruct2(
-            text, instruction, reference_audio, stream=stream
-        )):
-            output_audio = result['tts_speech']
-            if not stream:
-                break
-        
-        if output_audio is None:
-            raise Exception("指令式合成失败，未生成音频")
-        
-        return await self._process_output_audio(output_audio)
+    async def _cross_lingual_synthesis_with_speaker(self, text: str, speaker_id: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """使用指定speaker进行跨语言语音合成"""
+        try:
+            # 获取speaker的参考音频
+            if speaker_id not in self.speakers_cache:
+                raise ValueError(f"Speaker {speaker_id} 不存在")
+            
+            speaker_info = self.speakers_cache[speaker_id]
+            reference_audio_path = speaker_info['reference_audio_path']
+            
+            # 准备参考音频
+            processed_audio_path = await self._prepare_reference_audio(reference_audio_path)
+            reference_audio = self.load_wav(processed_audio_path, self.model.sample_rate)
+            
+            # 执行跨语言合成
+            output_audio = None
+            stream = kwargs.get('stream', False)
+            
+            for i, result in enumerate(self.model.inference_cross_lingual(
+                text, reference_audio, stream=stream
+            )):
+                output_audio = result['tts_speech']
+                if not stream:
+                    break
+            
+            if output_audio is None:
+                raise Exception("跨语言合成失败，未生成音频")
+            
+            return await self._process_output_audio(output_audio)
+            
+        except Exception as e:
+            logger.error(f"❌ 跨语言合成失败: {str(e)}")
+            raise
+    
+    async def _instruct_synthesis_with_speaker(self, text: str, speaker_id: str, instruction: Optional[str], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """使用指定speaker进行指令式语音合成"""
+        try:
+            # 获取speaker的参考音频
+            if speaker_id not in self.speakers_cache:
+                raise ValueError(f"Speaker {speaker_id} 不存在")
+            
+            speaker_info = self.speakers_cache[speaker_id]
+            reference_audio_path = speaker_info['reference_audio_path']
+            
+            # 准备参考音频
+            processed_audio_path = await self._prepare_reference_audio(reference_audio_path)
+            reference_audio = self.load_wav(processed_audio_path, self.model.sample_rate)
+            
+            # 使用默认指令如果未提供
+            if not instruction:
+                instruction = '用温和清晰的声音朗读'
+            
+            # 执行指令式合成
+            output_audio = None
+            stream = kwargs.get('stream', False)
+            
+            for i, result in enumerate(self.model.inference_instruct2(
+                text, instruction, reference_audio, stream=stream
+            )):
+                output_audio = result['tts_speech']
+                if not stream:
+                    break
+            
+            if output_audio is None:
+                raise Exception("指令式合成失败，未生成音频")
+            
+            return await self._process_output_audio(output_audio)
+            
+        except Exception as e:
+            logger.error(f"❌ 指令式合成失败: {str(e)}")
+            raise
     
     async def _process_output_audio(self, output_audio) -> Dict[str, Any]:
         """处理输出音频"""
@@ -553,6 +747,37 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             # 提供更详细的错误信息
             logger.error(f"❌ 音频处理失败: {str(e)}")
             raise Exception(f"音频处理失败: {str(e)}")
+    
+    async def get_speaker_list(self) -> Dict[str, Any]:
+        """获取可用的speaker列表"""
+        return {
+            'speakers': list(self.speakers_cache.keys()),
+            'default_speaker': self.default_speaker_id,
+            'count': len(self.speakers_cache)
+        }
+    
+    async def remove_speaker(self, speaker_id: str) -> bool:
+        """删除指定的speaker"""
+        try:
+            if speaker_id in self.speakers_cache:
+                del self.speakers_cache[speaker_id]
+                
+                # 如果删除的是默认speaker，清除默认设置
+                if self.default_speaker_id == speaker_id:
+                    self.default_speaker_id = None
+                
+                # 保存更新后的speaker信息
+                await self._save_speaker_info()
+                
+                logger.info(f"✅ 已删除speaker: {speaker_id}")
+                return True
+            else:
+                logger.warning(f"⚠️ Speaker不存在: {speaker_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ 删除speaker失败: {str(e)}")
+            return False
 
 class MockSynthesizer(SpeechSynthesizer):
     """模拟语音合成器"""
@@ -769,7 +994,7 @@ class SpeechProcessor:
                         tts_model: Optional[str] = None,
                         request_id: Optional[str] = None,
                         **kwargs) -> SpeechSynthesisResponse:
-        """语音合成 - 优化版"""
+        """语音合成 - 优化版，支持音色一致性"""
         if not self.is_initialized:
             raise RuntimeError("语音处理器未初始化")
         
@@ -810,6 +1035,62 @@ class SpeechProcessor:
         except Exception as e:
             logger.error(f"❌ 语音合成失败: {str(e)}")
             raise
+
+    async def add_speaker(self, 
+                         reference_audio_path: str, 
+                         reference_text: str, 
+                         speaker_id: Optional[str] = None) -> Dict[str, Any]:
+        """添加新的speaker"""
+        if 'cosyvoice' not in self.synthesizers:
+            raise ValueError("CosyVoice合成器不可用")
+        
+        synthesizer = self.synthesizers['cosyvoice']
+        if hasattr(synthesizer, '_add_speaker'):
+            try:
+                new_speaker_id = await synthesizer._add_speaker(reference_text, reference_audio_path, speaker_id)
+                return {
+                    'success': True,
+                    'speaker_id': new_speaker_id,
+                    'message': f'成功添加speaker: {new_speaker_id}'
+                }
+            except Exception as e:
+                return {
+                    'success': False,
+                    'error': str(e),
+                    'message': f'添加speaker失败: {str(e)}'
+                }
+        else:
+            return {
+                'success': False,
+                'error': 'CosyVoice合成器不支持添加speaker',
+                'message': 'CosyVoice合成器不支持添加speaker'
+            }
+
+    async def get_speaker_list(self) -> Dict[str, Any]:
+        """获取可用的speaker列表"""
+        if 'cosyvoice' not in self.synthesizers:
+            return {'speakers': [], 'default_speaker': None, 'count': 0}
+        
+        synthesizer = self.synthesizers['cosyvoice']
+        if hasattr(synthesizer, 'get_speaker_list'):
+            return await synthesizer.get_speaker_list()
+        else:
+            return {'speakers': [], 'default_speaker': None, 'count': 0}
+
+    async def remove_speaker(self, speaker_id: str) -> Dict[str, Any]:
+        """删除指定的speaker"""
+        if 'cosyvoice' not in self.synthesizers:
+            return {'success': False, 'error': 'CosyVoice合成器不可用'}
+        
+        synthesizer = self.synthesizers['cosyvoice']
+        if hasattr(synthesizer, 'remove_speaker'):
+            success = await synthesizer.remove_speaker(speaker_id)
+            return {
+                'success': success,
+                'message': f'Speaker {speaker_id} 删除{"成功" if success else "失败"}'
+            }
+        else:
+            return {'success': False, 'error': 'CosyVoice合成器不支持删除speaker'}
 
     async def health_check(self) -> Dict[str, Any]:
         """健康检查"""
@@ -898,3 +1179,15 @@ async def recognize_speech(audio_data: bytes, **kwargs) -> SpeechRecognitionResp
 async def synthesize_speech(text: str, **kwargs) -> SpeechSynthesisResponse:
     """便捷的语音合成函数"""
     return await speech_processor.synthesize(text, **kwargs)
+
+async def add_speaker(reference_audio_path: str, reference_text: str, speaker_id: Optional[str] = None) -> Dict[str, Any]:
+    """便捷的添加speaker函数"""
+    return await speech_processor.add_speaker(reference_audio_path, reference_text, speaker_id)
+
+async def get_speaker_list() -> Dict[str, Any]:
+    """便捷的获取speaker列表函数"""
+    return await speech_processor.get_speaker_list()
+
+async def remove_speaker(speaker_id: str) -> Dict[str, Any]:
+    """便捷的删除speaker函数"""
+    return await speech_processor.remove_speaker(speaker_id)
