@@ -9,6 +9,7 @@ import base64
 import tempfile
 import time
 import uuid
+import json
 from typing import Dict, Any, Optional, List, Union
 from datetime import datetime
 from pathlib import Path
@@ -268,11 +269,31 @@ class SpeechSynthesizer:
         """合成语音（由子类实现）"""
         raise NotImplementedError
 class CosyVoiceSynthesizer(SpeechSynthesizer):
-    """CosyVoice 语音合成器 - 基于官方实现优化"""
+    """CosyVoice 语音合成器 - 基于官方实现优化，支持speaker缓存"""
+    
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.model = None  # Initialize model attribute
+        
+        # 参考音频设置 - 早期初始化以支持测试
+        self.reference_audio_path = config.get('reference_audio', None)
+        self.reference_text = config.get('reference_text', '参考音频文本')
+        
+        # Speaker缓存相关
+        self.speaker_cache = {}  # speaker_id -> speaker_info
+        self.speaker_cache_dir = config.get('speaker_cache_dir', '/tmp/ai_system_speakers')
+        self.default_speaker_id = 'default_speaker'
+        
+        # 确保speaker缓存目录存在
+        Path(self.speaker_cache_dir).mkdir(parents=True, exist_ok=True)
     
     async def _setup(self):
         """设置 CosyVoice - 根据官方最佳实践"""
         try:
+            # 参考音频设置 - 提前初始化
+            self.reference_audio_path = self.config.get('reference_audio', None)
+            self.reference_text = self.config.get('reference_text', '参考音频文本')
+            
             # 设置 CosyVoice 路径 - 修复路径配置
             import sys
             
@@ -322,11 +343,11 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             self.load_wav = load_wav
             self.torchaudio = torchaudio
             
-            # 参考音频设置
-            self.reference_audio_path = self.config.get('reference_audio', None)
-            self.reference_text = self.config.get('reference_text', '参考音频文本')
+            # 初始化speaker缓存
+            await self._initialize_speaker_cache()
             
             logger.info(f"✅ CosyVoice 模型初始化成功 - 模型路径: {model_dir}")
+            logger.info(f"📁 Speaker缓存目录: {self.speaker_cache_dir}")
             
         except ImportError as e:
             logger.warning(f"⚠️ CosyVoice 未正确安装: {str(e)}")
@@ -335,6 +356,148 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             logger.error(f"❌ CosyVoice 初始化失败: {str(e)}")
             raise
     
+    async def _initialize_speaker_cache(self):
+        """初始化speaker缓存系统"""
+        try:
+            # 如果有默认参考音频，预加载为默认speaker
+            if self.reference_audio_path and Path(self.reference_audio_path).exists():
+                logger.info("🎤 预加载默认speaker...")
+                await self._add_speaker_to_cache(
+                    speaker_id=self.default_speaker_id,
+                    reference_audio_path=self.reference_audio_path,
+                    reference_text=self.reference_text
+                )
+                logger.info(f"✅ 默认speaker已加载: {self.default_speaker_id}")
+            
+            # 加载已保存的speaker缓存
+            await self._load_speaker_cache_from_disk()
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Speaker缓存初始化失败: {str(e)}")
+    
+    async def _add_speaker_to_cache(self, speaker_id: str, reference_audio_path: str, reference_text: str):
+        """添加speaker到缓存
+        
+        Args:
+            speaker_id: speaker标识符
+            reference_audio_path: 参考音频路径
+            reference_text: 参考音频对应的文本
+        """
+        try:
+            if self.model is None:
+                logger.warning("模型未初始化，跳过speaker缓存")
+                return
+            
+            # 检查音频文件格式并转换
+            if Path(reference_audio_path).suffix.lower() != '.wav':
+                logger.info(f"转换参考音频格式: {reference_audio_path}")
+                reference_audio_path = convert_audio_to_wav(
+                    reference_audio_path, 
+                    sample_rate=self.model.sample_rate
+                )
+            
+            # 加载音频
+            reference_audio = self.load_wav(reference_audio_path, self.model.sample_rate)
+            
+            # 根据CosyVoice2官方最佳实践，使用add_zero_shot_spk保存speaker信息
+            # 注意：这是基于官方文档的实现，如果实际API不同，需要调整
+            if hasattr(self.model, 'add_zero_shot_spk'):
+                speaker_info = self.model.add_zero_shot_spk(reference_audio, reference_text)
+                logger.info(f"✅ 使用add_zero_shot_spk保存speaker: {speaker_id}")
+            else:
+                # 如果模型没有add_zero_shot_spk方法，我们保存原始数据
+                speaker_info = {
+                    'reference_audio': reference_audio,
+                    'reference_text': reference_text,
+                    'audio_path': reference_audio_path,
+                    'sample_rate': self.model.sample_rate
+                }
+                logger.info(f"✅ 保存speaker原始信息: {speaker_id}")
+            
+            # 保存到内存缓存
+            self.speaker_cache[speaker_id] = {
+                'info': speaker_info,
+                'reference_text': reference_text,
+                'audio_path': reference_audio_path,
+                'created_at': time.time()
+            }
+            
+            # 持久化保存
+            await self._save_speaker_to_disk(speaker_id)
+            
+            logger.info(f"🎤 Speaker已添加到缓存: {speaker_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ 添加speaker到缓存失败: {str(e)}")
+            raise
+    
+    async def _get_speaker_from_cache(self, speaker_id: str) -> Optional[Dict[str, Any]]:
+        """从缓存获取speaker信息"""
+        return self.speaker_cache.get(speaker_id)
+    
+    async def _save_speaker_to_disk(self, speaker_id: str):
+        """保存speaker信息到磁盘"""
+        try:
+            if speaker_id not in self.speaker_cache:
+                return
+            
+            cache_file = Path(self.speaker_cache_dir) / f"{speaker_id}.json"
+            speaker_data = self.speaker_cache[speaker_id].copy()
+            
+            # 不保存音频tensor，只保存元数据
+            speaker_data['info'] = {
+                'audio_path': speaker_data['audio_path'],
+                'reference_text': speaker_data['reference_text'],
+                'sample_rate': getattr(self.model, 'sample_rate', 22050),
+                'created_at': speaker_data['created_at']
+            }
+            
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(speaker_data, f, ensure_ascii=False, indent=2)
+            
+            logger.debug(f"💾 Speaker信息已保存到磁盘: {cache_file}")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ 保存speaker到磁盘失败: {str(e)}")
+    
+    async def _load_speaker_cache_from_disk(self):
+        """从磁盘加载speaker缓存"""
+        try:
+            cache_dir = Path(self.speaker_cache_dir)
+            if not cache_dir.exists():
+                return
+            
+            for cache_file in cache_dir.glob("*.json"):
+                try:
+                    speaker_id = cache_file.stem
+                    with open(cache_file, 'r', encoding='utf-8') as f:
+                        speaker_data = json.load(f)
+                    
+                    # 验证音频文件是否仍然存在
+                    audio_path = speaker_data['info']['audio_path']
+                    if Path(audio_path).exists():
+                        # 重新加载speaker到缓存
+                        await self._add_speaker_to_cache(
+                            speaker_id=speaker_id,
+                            reference_audio_path=audio_path,
+                            reference_text=speaker_data['reference_text']
+                        )
+                        logger.debug(f"📂 从磁盘加载speaker: {speaker_id}")
+                    else:
+                        logger.warning(f"⚠️ Speaker音频文件不存在，跳过: {audio_path}")
+                        # 删除无效的缓存文件
+                        cache_file.unlink(missing_ok=True)
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ 加载speaker缓存文件失败 {cache_file}: {str(e)}")
+                    
+        except Exception as e:
+            logger.warning(f"⚠️ 从磁盘加载speaker缓存失败: {str(e)}")
+    
+    def list_cached_speakers(self) -> List[str]:
+        """列出所有缓存的speaker"""
+        return list(self.speaker_cache.keys())
+    
     async def synthesize(self, 
                         text: str, 
                         voice: Optional[str] = None,
@@ -342,8 +505,9 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                         speed: float = 1.0,
                         pitch: float = 1.0,
                         synthesis_mode: str = "instruct",
+                        speaker_id: Optional[str] = None,
                         **kwargs) -> Dict[str, Any]:
-        """CosyVoice 语音合成 - 支持多种合成模式"""
+        """CosyVoice 语音合成 - 支持多种合成模式和speaker缓存"""
         start_time = time.time()
         
         try:
@@ -367,8 +531,15 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                     "duration": duration,
                     "processing_time": processing_time,
                     "model_used": "mock_cosyvoice",
-                    "synthesis_mode": synthesis_mode
+                    "synthesis_mode": synthesis_mode,
+                    "speaker_id": speaker_id or "mock_speaker"
                 }
+            
+            # 获取或创建speaker
+            speaker_info = await self._get_or_create_speaker(kwargs, speaker_id)
+            if speaker_info:
+                kwargs['speaker_info'] = speaker_info
+                kwargs['speaker_id'] = speaker_info.get('speaker_id', speaker_id)
             
             # 根据合成模式选择不同的方法
             if synthesis_mode == "zero_shot":
@@ -384,6 +555,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             processing_time = time.time() - start_time
             result["processing_time"] = processing_time
             result["synthesis_mode"] = synthesis_mode
+            result["speaker_id"] = kwargs.get('speaker_id', speaker_id or 'default')
             
             log_speech_operation(
                 logger, "synthesis", "cosyvoice", 
@@ -405,8 +577,108 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             
             raise Exception(f"CosyVoice 合成失败: {error_msg}")
     
+    async def _get_or_create_speaker(self, kwargs: Dict[str, Any], speaker_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """获取或创建speaker信息"""
+        try:
+            # 如果指定了speaker_id，优先使用缓存的speaker
+            if speaker_id:
+                cached_speaker = await self._get_speaker_from_cache(speaker_id)
+                if cached_speaker:
+                    logger.info(f"🎤 使用缓存的speaker: {speaker_id}")
+                    return cached_speaker
+                else:
+                    logger.warning(f"⚠️ 指定的speaker不存在于缓存中: {speaker_id}")
+            
+            # 检查是否提供了新的参考音频
+            reference_audio_path = kwargs.get('reference_audio')
+            reference_text = kwargs.get('reference_text')
+            
+            if reference_audio_path and reference_text:
+                # 生成speaker_id（如果未提供）
+                if not speaker_id:
+                    import hashlib
+                    # 基于音频路径和文本生成唯一ID
+                    content = f"{reference_audio_path}_{reference_text}"
+                    speaker_id = hashlib.md5(content.encode()).hexdigest()[:12]
+                
+                # 检查该speaker是否已经缓存
+                cached_speaker = await self._get_speaker_from_cache(speaker_id)
+                if cached_speaker:
+                    logger.info(f"🎤 使用已缓存的speaker: {speaker_id}")
+                    return cached_speaker
+                
+                # 创建新的speaker
+                logger.info(f"🎤 创建新的speaker: {speaker_id}")
+                await self._add_speaker_to_cache(speaker_id, reference_audio_path, reference_text)
+                return await self._get_speaker_from_cache(speaker_id)
+            
+            # 使用默认speaker
+            if self.default_speaker_id in self.speaker_cache:
+                logger.info(f"🎤 使用默认speaker: {self.default_speaker_id}")
+                return self.speaker_cache[self.default_speaker_id]
+            
+            # 如果没有任何speaker，返回None（使用原始方式）
+            logger.warning("⚠️ 没有可用的speaker，将使用传统方式处理参考音频")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ 获取或创建speaker失败: {str(e)}")
+            return None
+    
     async def _zero_shot_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """零样本语音合成"""
+        """零样本语音合成 - 支持speaker缓存"""
+        # 优先使用缓存的speaker信息
+        speaker_info = kwargs.get('speaker_info')
+        
+        if speaker_info and 'info' in speaker_info:
+            # 使用缓存的speaker
+            logger.info(f"🎤 使用缓存speaker进行零样本合成")
+            cached_info = speaker_info['info']
+            
+            if hasattr(self.model, 'inference_zero_shot_with_spk') and 'reference_audio' in cached_info:
+                # 如果模型支持预处理的speaker信息
+                output_audio = None
+                stream = kwargs.get('stream', False)
+                
+                for i, result in enumerate(self.model.inference_zero_shot_with_spk(
+                    text, cached_info, stream=stream
+                )):
+                    output_audio = result['tts_speech']
+                    if not stream:
+                        break
+                        
+                if output_audio is None:
+                    raise Exception("零样本合成失败，未生成音频")
+                    
+                return await self._process_output_audio(output_audio)
+            
+            else:
+                # 使用原始音频信息
+                reference_audio = cached_info.get('reference_audio')
+                reference_text = speaker_info['reference_text']
+                
+                if reference_audio is not None:
+                    output_audio = None
+                    stream = kwargs.get('stream', False)
+                    
+                    for i, result in enumerate(self.model.inference_zero_shot(
+                        text, reference_text, reference_audio, stream=stream
+                    )):
+                        output_audio = result['tts_speech']
+                        if not stream:
+                            break
+                    
+                    if output_audio is None:
+                        raise Exception("零样本合成失败，未生成音频")
+                    
+                    return await self._process_output_audio(output_audio)
+        
+        # 回退到传统方式
+        logger.info("🔄 回退到传统零样本合成方式")
+        return await self._traditional_zero_shot_synthesis(text, kwargs)
+    
+    async def _traditional_zero_shot_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """传统零样本语音合成（原始实现）"""
         # 获取参考音频
         reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
         reference_text = kwargs.get('reference_text', self.reference_text)
@@ -444,7 +716,39 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         return await self._process_output_audio(output_audio)
     
     async def _cross_lingual_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """跨语言语音合成"""
+        """跨语言语音合成 - 支持speaker缓存"""
+        # 优先使用缓存的speaker信息
+        speaker_info = kwargs.get('speaker_info')
+        
+        if speaker_info and 'info' in speaker_info:
+            logger.info(f"🎤 使用缓存speaker进行跨语言合成")
+            cached_info = speaker_info['info']
+            
+            # 使用原始音频信息
+            reference_audio = cached_info.get('reference_audio')
+            
+            if reference_audio is not None:
+                output_audio = None
+                stream = kwargs.get('stream', False)
+                
+                for i, result in enumerate(self.model.inference_cross_lingual(
+                    text, reference_audio, stream=stream
+                )):
+                    output_audio = result['tts_speech']
+                    if not stream:
+                        break
+                
+                if output_audio is None:
+                    raise Exception("跨语言合成失败，未生成音频")
+                
+                return await self._process_output_audio(output_audio)
+        
+        # 回退到传统方式
+        logger.info("🔄 回退到传统跨语言合成方式")
+        return await self._traditional_cross_lingual_synthesis(text, kwargs)
+    
+    async def _traditional_cross_lingual_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """传统跨语言语音合成（原始实现）"""
         reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
         
         if not reference_audio_path or not Path(reference_audio_path).exists():
@@ -480,7 +784,41 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         return await self._process_output_audio(output_audio)
     
     async def _instruct_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """指令式语音合成"""
+        """指令式语音合成 - 支持speaker缓存"""
+        # 优先使用缓存的speaker信息
+        speaker_info = kwargs.get('speaker_info')
+        instruction = kwargs.get('instruction', '用温和的中文女声朗读')
+        
+        if speaker_info and 'info' in speaker_info:
+            logger.info(f"🎤 使用缓存speaker进行指令式合成")
+            cached_info = speaker_info['info']
+            
+            # 使用原始音频信息
+            reference_audio = cached_info.get('reference_audio')
+            
+            if reference_audio is not None:
+                output_audio = None
+                stream = kwargs.get('stream', False)
+                
+                # 执行指令式合成 - 使用正确的方法名 inference_instruct2
+                for i, result in enumerate(self.model.inference_instruct2(
+                    text, instruction, reference_audio, stream=stream
+                )):
+                    output_audio = result['tts_speech']
+                    if not stream:
+                        break
+                
+                if output_audio is None:
+                    raise Exception("指令式合成失败，未生成音频")
+                
+                return await self._process_output_audio(output_audio)
+        
+        # 回退到传统方式
+        logger.info("🔄 回退到传统指令式合成方式")
+        return await self._traditional_instruct_synthesis(text, kwargs)
+    
+    async def _traditional_instruct_synthesis(self, text: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """传统指令式语音合成（原始实现）"""
         reference_audio_path = kwargs.get('reference_audio', self.reference_audio_path)
         instruction = kwargs.get('instruction', '用温和的中文女声朗读')
         
@@ -553,6 +891,113 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             # 提供更详细的错误信息
             logger.error(f"❌ 音频处理失败: {str(e)}")
             raise Exception(f"音频处理失败: {str(e)}")
+    
+    # Public speaker management methods
+    async def add_speaker(self, speaker_id: str, reference_audio_path: str, reference_text: str) -> bool:
+        """添加新的speaker到缓存
+        
+        Args:
+            speaker_id: speaker标识符
+            reference_audio_path: 参考音频路径
+            reference_text: 参考音频对应的文本
+            
+        Returns:
+            bool: 添加是否成功
+        """
+        try:
+            await self._add_speaker_to_cache(speaker_id, reference_audio_path, reference_text)
+            logger.info(f"✅ Speaker已添加: {speaker_id}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ 添加speaker失败: {str(e)}")
+            return False
+    
+    async def remove_speaker(self, speaker_id: str) -> bool:
+        """从缓存中移除speaker
+        
+        Args:
+            speaker_id: speaker标识符
+            
+        Returns:
+            bool: 移除是否成功
+        """
+        try:
+            if speaker_id in self.speaker_cache:
+                del self.speaker_cache[speaker_id]
+                
+                # 删除磁盘文件
+                cache_file = Path(self.speaker_cache_dir) / f"{speaker_id}.json"
+                cache_file.unlink(missing_ok=True)
+                
+                logger.info(f"🗑️ Speaker已移除: {speaker_id}")
+                return True
+            else:
+                logger.warning(f"⚠️ Speaker不存在: {speaker_id}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ 移除speaker失败: {str(e)}")
+            return False
+    
+    def get_speaker_info(self, speaker_id: str) -> Optional[Dict[str, Any]]:
+        """获取speaker信息
+        
+        Args:
+            speaker_id: speaker标识符
+            
+        Returns:
+            Dict: speaker信息，如果不存在返回None
+        """
+        speaker_data = self.speaker_cache.get(speaker_id)
+        if speaker_data:
+            return {
+                'speaker_id': speaker_id,
+                'reference_text': speaker_data['reference_text'],
+                'audio_path': speaker_data['audio_path'],
+                'created_at': speaker_data['created_at']
+            }
+        return None
+    
+    async def validate_speaker_consistency(self, speaker_id: str, test_texts: List[str]) -> Dict[str, Any]:
+        """验证speaker的音色一致性
+        
+        Args:
+            speaker_id: speaker标识符
+            test_texts: 测试文本列表
+            
+        Returns:
+            Dict: 验证结果
+        """
+        if speaker_id not in self.speaker_cache:
+            return {"error": f"Speaker不存在: {speaker_id}"}
+        
+        try:
+            results = []
+            for i, text in enumerate(test_texts):
+                result = await self.synthesize(
+                    text=text,
+                    speaker_id=speaker_id,
+                    synthesis_mode="zero_shot"
+                )
+                results.append({
+                    "text": text,
+                    "audio_data": result["audio_data"],
+                    "duration": result["duration"],
+                    "processing_time": result["processing_time"]
+                })
+            
+            return {
+                "speaker_id": speaker_id,
+                "test_count": len(test_texts),
+                "results": results,
+                "success": True
+            }
+            
+        except Exception as e:
+            return {
+                "speaker_id": speaker_id,
+                "error": str(e),
+                "success": False
+            }
 
 class MockSynthesizer(SpeechSynthesizer):
     """模拟语音合成器"""
@@ -616,6 +1061,7 @@ class SpeechProcessor:
                 'cosyvoice_path': os.getenv('COSYVOICE_PATH', 'tools/CosyVoice'),
                 'reference_audio': os.getenv('COSYVOICE_REF_AUDIO', None),
                 'reference_text': os.getenv('COSYVOICE_REF_TEXT', '参考音频文本'),
+                'speaker_cache_dir': os.getenv('COSYVOICE_SPEAKER_CACHE_DIR', '/tmp/ai_system_speakers'),
                 'load_jit': os.getenv('COSYVOICE_LOAD_JIT', 'false').lower() == 'true',
                 'load_trt': os.getenv('COSYVOICE_LOAD_TRT', 'false').lower() == 'true',
                 'fp16': os.getenv('COSYVOICE_FP16', 'false').lower() == 'true'
