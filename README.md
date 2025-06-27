@@ -9,6 +9,7 @@
 - **多模型支持**: 集成多种 LLM 提供商（DashScope、Xinference、OpenAI、Anthropic 等）
 - **MCP 工具系统**: 支持 Model Context Protocol 工具扩展
 - **语音处理**: 集成语音识别和语音合成功能（SensVoice、Whisper、CosyVoice、Edge TTS）
+- **CosyVoice音色一致性**: 支持speaker ID缓存，确保多次合成保持相同音色
 - **MongoDB数据管理**: 支持文字和图片混合数据的增删改查
 - **完整日志系统**: 结构化日志记录，运行步骤可视化
 - **配置管理**: 灵活的配置系统，支持动态更新
@@ -204,6 +205,32 @@ python main.py --reload
 
 - `POST /api/speech/recognize` - 语音识别（支持 SensVoice、Whisper）
 - `POST /api/speech/synthesize` - 语音合成（支持 CosyVoice、Edge TTS）
+
+#### CosyVoice 音色一致性功能
+
+新增speaker ID缓存机制，确保语音合成音色一致性：
+
+```bash
+# 使用指定speaker ID进行合成，保持音色一致
+curl -X POST "http://localhost:8000/api/speech/synthesize" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "要合成的文本",
+    "synthesis_mode": "zero_shot",
+    "speaker_id": "my_custom_voice"
+  }'
+
+# 使用新的参考音频自动创建speaker
+curl -X POST "http://localhost:8000/api/speech/synthesize" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "要合成的文本",
+    "reference_audio": "path/to/reference.wav",
+    "reference_text": "参考音频对应的文本"
+  }'
+```
+
+详细文档请参阅：[CosyVoice Speaker Management](docs/CosyVoice_Speaker_Management.md)
 
 ### 对话功能
 
