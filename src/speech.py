@@ -262,7 +262,7 @@ class SpeechSynthesizer:
                         text: str, 
                         voice: Optional[str] = None,
                         language: str = "zh-CN",
-                        speed: float = 1.2,
+                        speed: float = 3.0,
                         pitch: float = 3.0,
                         **kwargs) -> Dict[str, Any]:
         """合成语音（由子类实现）"""
@@ -565,8 +565,8 @@ class MockSynthesizer(SpeechSynthesizer):
                        text: str, 
                        voice: Optional[str] = None,
                        language: str = "zh-CN",
-                       speed: float = 1.0,
-                       pitch: float = 8.0,
+                       speed: float = 3.0,
+                       pitch: float = 3.0,
                        **kwargs) -> Dict[str, Any]:
         """模拟语音合成"""
         logger.info(f"🔊 开始模拟语音合成 - 文本长度: {len(text)}")
@@ -764,7 +764,7 @@ class SpeechProcessor:
                         text: str,
                         voice: Optional[str] = None,
                         language: str = "zh-CN",
-                        speed: float = 1.2,
+                        speed: float = 3.0,
                         pitch: float = 3.0,
                         tts_model: Optional[str] = None,
                         request_id: Optional[str] = None,
