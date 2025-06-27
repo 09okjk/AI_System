@@ -378,7 +378,10 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
     async def _setup_default_speaker(self):
         """设置默认speaker"""
         reference_audio_path = self.config.get('reference_audio', None)
-        reference_text = self.config.get('reference_text', '参考音频文本')
+        reference_text = self.config.get('reference_text', '')
+        
+        logger.info(f"参考音频路径: {reference_audio_path}")
+        logger.info(f"参考文本: {reference_text}")
         
         if reference_audio_path and Path(reference_audio_path).exists():
             try:
