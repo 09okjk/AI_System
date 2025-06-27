@@ -509,7 +509,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                         language: str = "zh-CN",
                         speed: float = 1.0,
                         pitch: float = 1.0,
-                        synthesis_mode: str = "instruct",
+                        synthesis_mode: str = "zero_shot",
                         reference_audio: Optional[str] = None,
                         reference_text: Optional[str] = None,
                         speaker_id: Optional[str] = None,
@@ -715,9 +715,9 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
         except Exception as e:
             logger.error(f"❌ 指令式合成失败: {str(e)}")
             raise
-    
+
     async def _process_output_audio(self, output_audio) -> Dict[str, Any]:
-        """处理输出音频 - 修复版本"""
+        """处理输出音频 - 修复采样率不匹配问题"""
         import io
         import tempfile
         
@@ -725,7 +725,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             logger.info(f"🔧 开始处理音频 - 张量形状: {output_audio.shape}")
             logger.info(f"🔧 音频数据类型: {output_audio.dtype}")
             logger.info(f"🔧 设备: {output_audio.device}")
-            logger.info(f"🔧 采样率: {self.model.sample_rate}")
+            logger.info(f"🔧 原始采样率: {self.model.sample_rate}")
             
             # 确保音频在CPU上且为正确的数据类型
             if output_audio.device.type != 'cpu':
@@ -739,17 +739,15 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             
             # 检查音频维度，确保是正确的格式 [channels, samples]
             if len(output_audio.shape) == 1:
-                # 如果是一维，添加通道维度
                 output_audio = output_audio.unsqueeze(0)
                 logger.info(f"📏 添加通道维度: {output_audio.shape}")
             elif len(output_audio.shape) == 3:
-                # 如果是三维，去除多余的维度
                 output_audio = output_audio.squeeze(0)
                 logger.info(f"📏 压缩维度: {output_audio.shape}")
             
             # 检查通道数，如果是多通道，只使用第一个通道
             if output_audio.shape[0] > 1:
-                output_audio = output_audio[0:1]  # 只保留第一个通道
+                output_audio = output_audio[0:1]
                 logger.info(f"🎵 使用单声道: {output_audio.shape}")
             
             # 归一化音频到合适的范围
@@ -757,6 +755,26 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             if max_val > 1.0:
                 output_audio = output_audio / max_val
                 logger.info(f"🔊 音频已归一化，最大值从 {max_val:.6f} 归一化到 1.0")
+            
+            # **关键修复：采样率重采样**
+            target_sample_rate = 22050  # 使用标准采样率
+            if self.model.sample_rate != target_sample_rate:
+                logger.info(f"🔄 重采样: {self.model.sample_rate}Hz -> {target_sample_rate}Hz")
+                
+                # 使用 torchaudio 进行重采样
+                import torchaudio.transforms as T
+                resampler = T.Resample(
+                    orig_freq=self.model.sample_rate,
+                    new_freq=target_sample_rate,
+                    dtype=output_audio.dtype
+                )
+                output_audio = resampler(output_audio)
+                logger.info(f"✅ 重采样完成 - 新形状: {output_audio.shape}")
+                
+                # 更新采样率
+                actual_sample_rate = target_sample_rate
+            else:
+                actual_sample_rate = self.model.sample_rate
             
             # 检查音频是否包含NaN或无穷大
             if torch.isnan(output_audio).any():
@@ -772,17 +790,17 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                 temp_audio_path = temp_file.name
             
             try:
-                # 使用torchaudio保存音频
+                # 使用torchaudio保存音频，使用标准参数
                 self.torchaudio.save(
                     temp_audio_path,
                     output_audio,
-                    self.model.sample_rate,
+                    actual_sample_rate,  # 使用实际的采样率
                     format='wav',
                     encoding='PCM_S',
                     bits_per_sample=16
                 )
                 
-                logger.info(f"💾 音频已保存到临时文件: {temp_audio_path}")
+                logger.info(f"💾 音频已保存到临时文件: {temp_audio_path} (采样率: {actual_sample_rate})")
                 
                 # 读取保存的WAV文件
                 with open(temp_audio_path, 'rb') as f:
@@ -790,20 +808,40 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                 
                 logger.info(f"📁 WAV文件大小: {len(audio_data)} 字节")
                 
+                # **验证音频文件**
+                try:
+                    import wave
+                    with wave.open(temp_audio_path, 'rb') as wav_file:
+                        frames = wav_file.getnframes()
+                        sample_rate = wav_file.getframerate()
+                        channels = wav_file.getnchannels()
+                        duration = frames / sample_rate
+                        logger.info(f"📊 WAV验证 - 时长: {duration:.2f}s, 采样率: {sample_rate}, 通道: {channels}")
+                except Exception as e:
+                    logger.warning(f"⚠️ WAV文件验证失败: {str(e)}")
+                
                 # 编码为base64
                 audio_base64 = base64.b64encode(audio_data).decode('utf-8')
                 
                 # 计算时长
-                duration = output_audio.shape[1] / self.model.sample_rate
+                duration = output_audio.shape[1] / actual_sample_rate
                 
-                logger.info(f"✅ 音频处理完成 - 时长: {duration:.2f}s, Base64长度: {len(audio_base64)}")
+                logger.info(f"✅ 音频处理完成 - 时长: {duration:.2f}s, Base64长度: {len(audio_base64)}, 采样率: {actual_sample_rate}")
+                
+                test_audio_path = f"/tmp/test_audio_{int(time.time())}.wav"
+                try:
+                    import shutil
+                    shutil.copy2(temp_audio_path, test_audio_path)
+                    logger.info(f"🎵 测试音频已保存到: {test_audio_path}")
+                except Exception as e:
+                    logger.warning(f"⚠️ 保存测试音频失败: {str(e)}")
                 
                 return {
                     "audio_data": audio_base64,
                     "format": AudioFormat.WAV,
                     "duration": duration,
                     "model_used": "cosyvoice",
-                    "sample_rate": self.model.sample_rate,
+                    "sample_rate": actual_sample_rate,  # 返回实际使用的采样率
                     "channels": output_audio.shape[0],
                     "audio_shape": list(output_audio.shape)
                 }
