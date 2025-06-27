@@ -324,7 +324,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
             
             # 参考音频设置
             self.reference_audio_path = self.config.get('reference_audio', None)
-            self.reference_text = self.config.get('reference_text', '参考音频文本')
+            self.reference_text = self.config.get('reference_text', '你好，我是青岛儒海船舶工程股份有限公司的前台解说，有什么可以帮到你的吗？')
             
             logger.info(f"✅ CosyVoice 模型初始化成功 - 模型路径: {model_dir}")
             
@@ -340,7 +340,7 @@ class CosyVoiceSynthesizer(SpeechSynthesizer):
                         voice: Optional[str] = None,
                         language: str = "zh-CN",
                         speed: float = 1.0,
-                        pitch: float = 1.0,
+                        pitch: float = 1.3,
                         synthesis_mode: str = "zero_shot",
                         **kwargs) -> Dict[str, Any]:
         """CosyVoice 语音合成 - 支持多种合成模式"""
