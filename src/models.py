@@ -253,7 +253,9 @@ class DataItemContent(BaseModel):
     image: Optional[str] = Field(None, description="图片数据（base64编码）")
     image_filename: Optional[str] = Field(None, description="图片文件名")
     image_mimetype: Optional[str] = Field(None, description="图片MIME类型")
-
+    camera_type: Optional[str] = Field(None, description="相机类型")
+    host_animation: Optional[str] = Field(None, description="主持人动画")
+    
     @field_validator('image')
     @classmethod
     def validate_image(cls, v):
